@@ -40,6 +40,18 @@ cp .env.example .env
 
 O coletor de eventos do cluster roda a cada `EVENT_COLLECTION_INTERVAL_MINUTES` minutos (padrao: 3; aceita fracoes, ex: `0.5`). Valores invalidos usam o padrao de 3 minutos.
 
+O agente de analise de causa raiz e configurado por:
+
+| Variavel | Descricao | Padrao |
+|----------|-----------|--------|
+| `AGENT_MODEL_NAME` | Modelo Claude do agente | `claude-haiku-4-5` |
+| `AGENT_MAX_ITERATIONS` | Maximo de chamadas ao modelo por analise | `25` |
+| `AGENT_TIMEOUT_MINUTES` | Prazo total de uma analise (deve ser menor que o stale timeout; senao usa stale - 1) | `20` |
+| `ANALYSIS_MAX_CONCURRENCY` | Maximo de analises simultaneas | `1` |
+| `ANALYSIS_STALE_TIMEOUT_MINUTES` | Relatorio EM_ANALISE sem atualizacao ha mais que isso e marcado INCOMPLETO | `30` |
+
+Valores invalidos (nao numericos, zero ou negativos) usam o padrao, com warning no log.
+
 #### Permissoes do coletor no cluster (RBAC)
 
 O coletor lista eventos `Warning` de todos os namespaces via API `events.k8s.io/v1`. Localmente ele usa o kubeconfig (`~/.kube/config` ou `KUBECONFIG`); dentro do cluster, a ServiceAccount do pod. Em ambos os casos a identidade precisa da permissao minima abaixo (ajuste `namespace` e nome da ServiceAccount):
@@ -84,6 +96,16 @@ docker compose up -d
 uv sync
 ```
 
+### 5.1. Aplicar as migrations
+
+O schema do banco (tabela `reports`) e versionado com Alembic. Com o banco no ar, aplique as migrations antes de subir a aplicacao:
+
+```bash
+uv run alembic upgrade head
+```
+
+A URL do banco vem de `DATABASE_URL` (a mesma da aplicacao).
+
 ### 6. Subir o MCP Server (via npx)
 
 O MCP Server Kubernetes roda localmente via `npx` expondo transport HTTP (streamable). Requer **Node.js/npx** instalado e um **kubeconfig** valido em `~/.kube/config`:
@@ -102,18 +124,28 @@ A aplicacao roda localmente via `uv`:
 uv run uvicorn meu_agente.main:app --host 0.0.0.0 --port 8000
 ```
 
+## Testes
+
+```bash
+uv run pytest
+```
+
+Os testes em `tests/integration/` rodam contra um PostgreSQL real, em um schema temporario criado e removido a cada teste (os dados de desenvolvimento nao sao tocados). A URL vem de `TEST_DATABASE_URL` (padrao: o banco do docker-compose); sem banco acessivel, esses testes sao pulados.
+
 ## Estrutura
 
 ```
 src/my_agent_app/
 ├── main.py              # FastAPI + lifespan
-├── database.py          # SQLAlchemy async engine
+├── database.py          # Base declarativa + DATABASE_URL
 ├── api/router.py        # Health check
 ├── web/router.py        # Pagina inicial (Jinja2)
 ├── templates/           # Templates HTML (dark theme)
-├── agents/              # (placeholder) Agentes LangChain + MCP
-├── collector/           # Loop de coleta de eventos Warning do cluster
-└── models/              # (placeholder) Modelos e queries
+├── agents/              # Agente de analise de causa raiz (LangChain + Claude + MCP)
+├── collector/           # Coleta de eventos Warning + pipeline de analise (handler)
+└── models/              # Modelo Report e ReportRepository
+
+alembic/                 # Migrations do banco
 ```
 
 ## Stack
