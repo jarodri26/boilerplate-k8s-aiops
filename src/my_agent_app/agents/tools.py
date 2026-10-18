@@ -39,7 +39,8 @@ async def load_read_only_tools(
     """Conecta ao MCP Server via HTTP e devolve apenas as tools de leitura.
 
     Falhas de conexao/sessao levantam excecao (tratadas pelo pipeline como INCOMPLETO);
-    erros de execucao de tool voltam ao modelo como ToolMessage (handle_tool_errors).
+    erros de execucao de tool voltam ao modelo pelo ToolErrorMiddleware do agente
+    (ver agents/tool_errors.py).
     """
     client = client_factory({"kubernetes": {"transport": "http", "url": url}})
     return filter_read_only_tools(await client.get_tools())

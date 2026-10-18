@@ -1,8 +1,13 @@
 import pytest
-from langchain.agents.middleware import ModelCallLimitMiddleware
+from langchain.agents import create_agent
+from langchain.agents.middleware import ModelCallLimitMiddleware, ToolErrorMiddleware
 from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
+
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData
 
 from my_agent_app.agents.analyzer import RootCauseAnalyzer, final_text
 
@@ -53,8 +58,9 @@ async def test_configuracao_repassada_ao_create_agent(monkeypatch):
     model = captured["model"]
     assert isinstance(model, ChatAnthropic)
     assert model.model == "claude-test" and model.max_retries == 3
-    (limit,) = captured["middleware"]
+    limit, tool_errors = captured["middleware"]
     assert isinstance(limit, ModelCallLimitMiddleware)
+    assert isinstance(tool_errors, ToolErrorMiddleware)
     assert limit.run_limit == 7 and limit.exit_behavior == "end"
     (msg,) = agent.inputs["messages"]
     assert msg["role"] == "user" and '"uid": "u1"' in msg["content"]
@@ -83,3 +89,40 @@ def test_final_text_vazio_quando_run_termina_em_chamada_de_tool():
     assert final_text([pendente]) == ""
     assert final_text([pendente, ToolMessage(content="x", tool_call_id="1")]) == ""
     assert final_text([]) == ""
+
+
+
+class _FakeToolModel(GenericFakeChatModel):
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+async def test_erro_de_tool_nao_aborta_a_analise(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    @tool("kubectl_get")
+    async def failing(name: str = "") -> str:
+        """fake"""
+        raise McpError(ErrorData(code=-32603, message='pods "x" not found'))
+
+    async def loader(url):
+        return [failing]
+
+    responses = iter(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "kubectl_get", "args": {"name": "x"}, "id": "1"}],
+            ),
+            AIMessage(content="## Problema 1: Pod removido"),
+        ]
+    )
+
+    def factory(**kwargs):
+        # agente real com os middlewares do RootCauseAnalyzer, so o modelo e falso
+        return create_agent(**{**kwargs, "model": _FakeToolModel(messages=responses)})
+
+    analyzer = RootCauseAnalyzer("claude-test", 5, "http://mcp", tools_loader=loader,
+                                 agent_factory=factory)
+
+    assert await analyzer.run([{"uid": "u1"}]) == "## Problema 1: Pod removido"

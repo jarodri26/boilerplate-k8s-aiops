@@ -1,17 +1,14 @@
-from types import SimpleNamespace
-
-import httpx
 import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolErrorMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
-from langchain_core.tools import ToolException, tool
+from langchain_core.tools import tool
 from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 
-from my_agent_app.agents.corrector import CorrectionAgent, tool_error_to_model
+from my_agent_app.agents.corrector import CorrectionAgent
 
 REPORT = "## Problema 1: Imagem inexistente\n### Comando Sugerido\nkubectl set image ..."
 
@@ -87,28 +84,6 @@ async def test_falha_do_loader_propaga(monkeypatch):
 
     with pytest.raises(ConnectionRefusedError):
         await corrector.run(REPORT)
-
-
-def _request(name="kubectl_generic"):
-    return SimpleNamespace(tool_call={"name": name, "args": {}, "id": "1"})
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        McpError(ErrorData(code=-32603, message='error: unknown command "deployment web"')),
-        ToolException('error: unknown command "deployment web"'),
-    ],
-)
-def test_erro_de_execucao_da_tool_volta_ao_modelo(error):
-    content = tool_error_to_model(error, _request())
-
-    assert content.startswith("Erro ao executar kubectl_generic:")
-    assert 'unknown command "deployment web"' in content
-
-
-def test_falha_de_conexao_propaga():
-    assert tool_error_to_model(httpx.ConnectError("conexao recusada"), _request()) is None
 
 
 class _FakeToolModel(GenericFakeChatModel):

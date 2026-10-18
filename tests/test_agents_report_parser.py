@@ -179,3 +179,56 @@ def test_uids_entre_crases_e_separadores_variados():
     (p,) = parse_problems(_secao(eventos=f"`{uid1}`;  `{uid2}`."), [uid1, uid2]).problems
 
     assert p.event_uids == [uid1, uid2]
+
+
+# --- robustez-agente-analise: fim da secao -------------------------------------------
+
+RESPOSTA_COM_RESUMO_FINAL = """## Resumo
+| Total | Criticos |
+|-------|----------|
+| 2     | 2        |
+
+---
+
+## Problema 1: Imagem inexistente
+- **Severidade:** CRITICO
+- **Eventos:** u1
+
+### Causa Raiz
+Tag inexistente.
+
+---
+
+## Problema 2: Registry invalido
+- **Severidade:** CRITICO
+- **Eventos:** u2
+
+### Causa Raiz
+Registry nao resolve.
+
+### Comando Sugerido
+```bash
+## comentario com dois cerquilhas dentro do bloco
+kubectl set image deployment/web web=nginx:1.27 -n prod
+```
+
+---
+
+## Resumo de Acoes Recomendadas
+
+| Problema | Acao |
+|----------|------|
+| web-imagem | Usar tag valida |
+"""
+
+
+def test_titulo_de_nivel_2_apos_o_ultimo_problema_nao_entra_no_relatorio():
+    result = parse_problems(RESPOSTA_COM_RESUMO_FINAL, ["u1", "u2"])
+
+    primeiro, ultimo = (p.markdown for p in result.problems)
+    assert "Resumo de Acoes Recomendadas" not in ultimo and "web-imagem" not in ultimo
+    assert ultimo.endswith("```")
+    assert "### Comando Sugerido" in ultimo
+    assert "## comentario com dois cerquilhas dentro do bloco" in ultimo
+    assert "| Total |" not in primeiro and primeiro.startswith("## Problema 1")
+    assert primeiro.endswith("Tag inexistente.")

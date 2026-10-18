@@ -2,12 +2,13 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware
+from langchain.agents.middleware import ModelCallLimitMiddleware, ToolErrorMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage
 from langchain_core.tools import BaseTool
 
 from my_agent_app.agents.prompt import render_prompt
+from my_agent_app.agents.tool_errors import tool_error_to_model
 from my_agent_app.agents.tools import load_read_only_tools
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,9 @@ class RootCauseAnalyzer:
             model=model,
             tools=tools,
             middleware=[
-                ModelCallLimitMiddleware(run_limit=self.max_iterations, exit_behavior="end")
+                ModelCallLimitMiddleware(run_limit=self.max_iterations, exit_behavior="end"),
+                # erro de execucao de tool volta ao modelo e a investigacao continua
+                ToolErrorMiddleware(on_error=tool_error_to_model),
             ],
         )
 

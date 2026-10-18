@@ -2,32 +2,16 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import (
-    ModelCallLimitMiddleware,
-    ToolCallRequest,
-    ToolErrorMiddleware,
-)
+from langchain.agents.middleware import ModelCallLimitMiddleware, ToolErrorMiddleware
 from langchain_anthropic import ChatAnthropic
-from langchain_core.tools import BaseTool, ToolException
-from mcp.shared.exceptions import McpError
+from langchain_core.tools import BaseTool
 
 from my_agent_app.agents.analyzer import MODEL_MAX_RETRIES, final_text
 from my_agent_app.agents.correction_prompt import render_correction_prompt
+from my_agent_app.agents.tool_errors import tool_error_to_model
 from my_agent_app.agents.tools import load_correction_tools
 
 logger = logging.getLogger(__name__)
-
-
-def tool_error_to_model(error: Exception, request: ToolCallRequest) -> str | None:
-    """Erro reportado ao executar a tool volta ao modelo, que tenta outra abordagem.
-
-    Falhas de transporte/conexao devolvem None e propagam (-> FALHA_CORRECAO).
-    """
-    if isinstance(error, (McpError, ToolException)):
-        name = request.tool_call.get("name", "?")
-        logger.warning("Tool %s falhou durante a correcao: %s", name, error)
-        return f"Erro ao executar {name}: {error}"
-    return None
 
 
 class CorrectionAgent:

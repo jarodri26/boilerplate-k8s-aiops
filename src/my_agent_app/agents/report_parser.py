@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 
 from my_agent_app.models.report import ReportStatus, Severity
 
-_SECTION_RE = re.compile(r"^##\s+Problema\b.*$", re.MULTILINE | re.IGNORECASE)
+_SECTION_RE = re.compile(r"^##\s+Problema\b", re.IGNORECASE)
+_H2_RE = re.compile(r"^##(?!#)\s")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _SEVERITY_RE = re.compile(r"\*\*Severidade:?\*\*:?\s*([^\s|*]+)", re.IGNORECASE)
 _EVENTS_RE = re.compile(r"\*\*Eventos:?\*\*:?\s*(.*)$", re.MULTILINE | re.IGNORECASE)
 _ROOT_CAUSE_RE = re.compile(
@@ -40,11 +42,27 @@ def _strip_accents(text: str) -> str:
     )
 
 
+def _h2_headings(markdown: str) -> list[tuple[int, bool]]:
+    """(offset, e_problema) de cada titulo de nivel 2 fora de blocos de codigo."""
+    headings, offset, in_fence = [], 0, False
+    for line in markdown.splitlines(keepends=True):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+        elif not in_fence and _H2_RE.match(line):
+            headings.append((offset, bool(_SECTION_RE.match(line))))
+        offset += len(line)
+    return headings
+
+
 def _split_sections(markdown: str) -> list[str]:
-    starts = [m.start() for m in _SECTION_RE.finditer(markdown)]
+    # a secao do problema termina no proximo titulo "## " de qualquer tipo: resumos
+    # finais da resposta (ex.: "## Resumo de Acoes") nao entram no ultimo relatorio
+    headings = _h2_headings(markdown)
     sections = []
-    for i, start in enumerate(starts):
-        end = starts[i + 1] if i + 1 < len(starts) else len(markdown)
+    for i, (start, is_problem) in enumerate(headings):
+        if not is_problem:
+            continue
+        end = headings[i + 1][0] if i + 1 < len(headings) else len(markdown)
         section = markdown[start:end].strip()
         # separadores horizontais entre secoes nao fazem parte do problema
         section = re.sub(r"(\n\s*-{3,}\s*)+$", "", section).strip()
