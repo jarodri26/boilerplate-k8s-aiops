@@ -153,6 +153,10 @@ A resposta Markdown do agente SHALL ser dividida em uma seção por problema (`#
 - **WHEN** a resposta do agente é vazia ou não contém nenhuma seção de problema identificável
 - **THEN** o relatório do batch passa a INCOMPLETO e nenhum relatório por problema é criado
 
+#### Scenario: Conteúdo após a última seção de problema
+- **WHEN** a resposta termina com um título de nível 2 que não é de problema (ex.: `## Resumo de Ações Recomendadas`) depois da última seção `## Problema N`
+- **THEN** o relatório do último problema não contém esse título nem o conteúdo abaixo dele, e mantém seus subtítulos `###`
+
 ### Requirement: Status de cada relatório por problema
 Um relatório por problema SHALL receber status COMPLETO quando sua severidade é CRITICO, ALTO, MEDIO ou BAIXO e sua seção de Causa Raiz não é vazia nem contém o termo "inconclusiv" (sem distinção de maiúsculas). Caso contrário, SHALL receber INCOMPLETO. O critério SHALL valer também quando o agente atingiu o limite de iterações.
 
