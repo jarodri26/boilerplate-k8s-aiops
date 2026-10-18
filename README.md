@@ -129,7 +129,7 @@ O agente LangChain conecta a esse servidor por HTTP em `http://localhost:3001/mc
 A aplicacao roda localmente via `uv`:
 
 ```bash
-uv run uvicorn my_agent.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn my_agent_app.main:app --host 0.0.0.0 --port 8000
 ```
 
 ## Interface web
