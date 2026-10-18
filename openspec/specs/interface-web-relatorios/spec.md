@@ -87,21 +87,6 @@ A página de detalhe SHALL exibir o botão "Executar correção", que envia `POS
 - **WHEN** o relatório está EM_ANALISE, INCOMPLETO, CORRIGINDO ou CORRIGIDO
 - **THEN** o botão "Executar correção" não é exibido
 
-### Requirement: Acionamento da correção antes do agente de correção
-Enquanto o agente de correção não existir, `POST /reports/{id}/fix` SHALL redirecionar para a página de detalhe do relatório exibindo a mensagem "Correção ainda não disponível", sem alterar o relatório. O detalhe SHALL também saber exibir a mensagem "Correção já em andamento", usada quando a correção recusa o pedido por já estar em curso.
-
-#### Scenario: Clique no botão
-- **WHEN** o usuário clica em "Executar correção" em um relatório COMPLETO
-- **THEN** o navegador volta ao detalhe do relatório com a mensagem "Correção ainda não disponível" e o status continua COMPLETO
-
-#### Scenario: Correção já em andamento
-- **WHEN** a página de detalhe é aberta indicando que a correção já está em curso
-- **THEN** a página exibe a mensagem "Correção já em andamento"
-
-#### Scenario: Correção para relatório inexistente
-- **WHEN** é enviado `POST /reports/{id}/fix` para um ID que não existe
-- **THEN** a resposta tem status 404
-
 ### Requirement: Banco de dados indisponível
 Quando o banco de dados não responde, a listagem e o detalhe SHALL exibir a página de erro com status 503 e a mensagem "Banco de dados indisponível, tente novamente em instantes".
 
@@ -112,3 +97,18 @@ Quando o banco de dados não responde, a listagem e o detalhe SHALL exibir a pá
 #### Scenario: Detalhe com banco fora do ar
 - **WHEN** o usuário abre `/reports/{id}` com o PostgreSQL indisponível
 - **THEN** a resposta tem status 503 e exibe a mesma mensagem
+
+### Requirement: Resultado da correção no detalhe
+Quando o relatório tem resultado da correção, a página de detalhe SHALL exibi-lo numa seção "Resultado da Correção", renderizado de Markdown para HTML com a mesma sanitização do conteúdo do relatório. Sem resultado da correção, a seção SHALL não ser exibida.
+
+#### Scenario: Correção concluída
+- **WHEN** o usuário abre o detalhe de um relatório CORRIGIDO cujo resultado da correção contém a seção "Acoes Executadas"
+- **THEN** a página exibe a seção "Resultado da Correção" com esse conteúdo formatado
+
+#### Scenario: Resultado com script
+- **WHEN** o resultado da correção contém `<script>alert(1)</script>`
+- **THEN** o HTML da página não contém esse elemento `<script>`
+
+#### Scenario: Sem correção
+- **WHEN** o usuário abre o detalhe de um relatório COMPLETO que nunca foi corrigido
+- **THEN** a seção "Resultado da Correção" não aparece
