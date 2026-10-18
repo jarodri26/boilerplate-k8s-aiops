@@ -26,6 +26,11 @@ uv run alembic upgrade head
 
 # Gerar uma nova migration a partir dos modelos
 uv run alembic revision --autogenerate -m "descricao"
+
+# Deploy no Kubernetes (namespace aiops-system; secrets criados a parte, ver README)
+docker build -t aiops-agent:dev .
+kubectl apply -k deploy/k8s/postgres   # opcional, Postgres para testes
+kubectl apply -k deploy/k8s
 ```
 
 A aplicacao roda localmente via `uv`; o Docker e usado apenas para o banco de dados.

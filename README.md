@@ -85,7 +85,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: aiops-agent
-    namespace: aiops
+    namespace: aiops-system
 ```
 
 Sem essa permissao, a API responde 403 e o coletor registra no log a permissao necessaria, tentando novamente no proximo ciclo. A aplicacao assume **uma unica instancia** (um worker uvicorn / uma replica): multiplas instancias duplicariam a coleta.
@@ -131,6 +131,52 @@ A aplicacao roda localmente via `uv`:
 ```bash
 uv run uvicorn my_agent_app.main:app --host 0.0.0.0 --port 8000
 ```
+
+## Deploy no Kubernetes
+
+A imagem da aplicacao e gerada pelo `Dockerfile` (multi-stage com `uv`, usuario sem privilegios) e os manifestos ficam em `deploy/k8s/` (namespace `aiops-system`):
+
+| Arquivo | Conteudo |
+|---------|----------|
+| `rbac.yaml` | ServiceAccount `aiops-agent` (so `list` em events) e ServiceAccount `aiops-mcp` com **cluster-admin** (escrita do agente de correcao) |
+| `mcp.yaml` | MCP Server (`flux159/mcp-server-kubernetes`) como Deployment + Service `aiops-mcp:3001` + NetworkPolicy (so a aplicacao acessa) |
+| `app.yaml` | ConfigMap, Deployment (1 replica, `Recreate`, initContainer `alembic upgrade head`) e Service ClusterIP |
+| `postgres/` | Postgres em StatefulSet, opcional para testes (em producao prefira um banco gerenciado) |
+
+Os segredos nao sao versionados; crie-os antes do deploy:
+
+```bash
+kubectl apply -f deploy/k8s/namespace.yaml
+
+# Somente se for usar o Postgres do cluster (deploy/k8s/postgres)
+kubectl -n aiops-system create secret generic aiops-postgres-secrets \
+  --from-literal=POSTGRES_USER=aiops \
+  --from-literal=POSTGRES_PASSWORD='<senha>' \
+  --from-literal=POSTGRES_DB=aiops_k8s
+
+kubectl -n aiops-system create secret generic aiops-agent-secrets \
+  --from-literal=ANTHROPIC_API_KEY='sk-ant-...' \
+  --from-literal=DATABASE_URL='postgresql+asyncpg://aiops:<senha>@aiops-postgres:5432/aiops_k8s'
+```
+
+Build e deploy (exemplo com kind; em outro cluster, publique a imagem num registry e ajuste `image:` em `app.yaml`):
+
+```bash
+docker build -t aiops-agent:dev .
+kind load docker-image aiops-agent:dev --name <cluster>
+
+kubectl apply -k deploy/k8s/postgres   # opcional
+kubectl apply -k deploy/k8s
+kubectl -n aiops-system rollout status deploy/aiops-agent
+```
+
+O Service e ClusterIP porque a v1 nao tem autenticacao. Acesse por port-forward (ou VPN/ingress interno):
+
+```bash
+kubectl -n aiops-system port-forward svc/aiops-agent 8000:8000
+```
+
+As variaveis nao secretas ficam no ConfigMap `aiops-agent-config` (em `app.yaml`); apos altera-lo, rode `kubectl -n aiops-system rollout restart deploy/aiops-agent`. O MCP Server so aceita requisicoes com Host `aiops-mcp:3001` (`DNS_REBINDING_ALLOWED_HOST`); se mudar o nome do Service ou a porta, ajuste essa variavel e `MCP_SERVER_URL` juntos.
 
 ## Interface web
 
@@ -183,5 +229,6 @@ alembic/                 # Migrations do banco
 | MCP Server | Integracao com ferramentas externas |
 | Jinja2 | Interface web server-side |
 | Docker Compose | Banco de dados local (PostgreSQL + pgAdmin) |
+| Docker + Kustomize | Imagem da aplicacao e deploy no Kubernetes (`deploy/k8s/`) |
 | Node.js + npx | Runtime do MCP Server Kubernetes (transport HTTP) |
 | UV + hatchling | Package manager + build system |

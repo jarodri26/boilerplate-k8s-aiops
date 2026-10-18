@@ -1,0 +1,49 @@
+# Aplicacao: o coletor so precisa listar eventos (events.k8s.io/v1) de todos os namespaces
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiops-agent
+  namespace: aiops-system
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aiops-event-collector
+rules:
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-event-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aiops-event-collector
+subjects:
+  - kind: ServiceAccount
+    name: aiops-agent
+    namespace: aiops-system
+---
+# MCP Server: o agente de correcao escreve no cluster sem restricao (risco aceito na v1)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiops-mcp
+  namespace: aiops-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-mcp-cluster-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: aiops-mcp
+    namespace: aiops-system
