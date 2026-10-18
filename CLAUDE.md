@@ -28,7 +28,7 @@ ENABLE_UNSAFE_STREAMABLE_HTTP_TRANSPORT=1 PORT=3001 npx mcp-server-kubernetes
 A aplicacao roda localmente via `uv`; o Docker e usado apenas para o banco de dados.
 O MCP Server roda localmente via `npx` expondo transport HTTP, e o LangChain conecta por HTTP (`MCP_SERVER_URL`).
 
-Nao ha testes ou linter configurados ainda.
+Testes com pytest + pytest-asyncio (em `tests/`): `uv run pytest`. Nao ha linter configurado ainda.
 
 ## Arquitetura
 
@@ -37,11 +37,11 @@ O codigo da aplicacao fica em `src/my_agent_app/` e e empacotado via hatchling (
 - **Database** (`database.py`) — Engine async SQLAlchemy + asyncpg, configurado via `DATABASE_URL`
 - **API** (`api/router.py`) — Health check
 - **Interface Web** (`web/router.py`) — Pagina inicial. Templates Jinja2 em `src/my_agent_app/templates/`
+- **Collector** (`collector/`) — Loop periodico (iniciado no `lifespan`) que coleta eventos Warning do cluster via SDK `kubernetes` (`events.k8s.io/v1`, JSON cru) e despacha o batch fire-and-forget ao `EventHandler` (placeholder do PRD 002)
 
 ### Modulos placeholder (a implementar)
 
 - **Agents** (`agents/`) — Agentes LangChain + MCP Server
-- **Collector** (`collector/`) — Loop periodico de coleta de dados
 - **Models** (`models/`) — Modelos SQLAlchemy e queries
 
 ## Variaveis de ambiente
@@ -51,6 +51,7 @@ O codigo da aplicacao fica em `src/my_agent_app/` e e empacotado via hatchling (
 | `ANTHROPIC_API_KEY` | Chave de API da Anthropic | (obrigatorio) |
 | `DATABASE_URL` | Connection string PostgreSQL async | `postgresql+asyncpg://aiops:aiops123@localhost:5432/aiops_k8s` |
 | `MCP_SERVER_URL` | Endpoint HTTP do MCP Server Kubernetes (via npx) | `http://localhost:3001/mcp` |
+| `EVENT_COLLECTION_INTERVAL_MINUTES` | Intervalo do loop de coleta de eventos Warning do cluster, em minutos (aceita fracoes) | `3` |
 
 ## Infraestrutura (docker-compose)
 

@@ -38,6 +38,38 @@ cp .env.example .env
 # Edite .env com suas configuracoes (ANTHROPIC_API_KEY, etc)
 ```
 
+O coletor de eventos do cluster roda a cada `EVENT_COLLECTION_INTERVAL_MINUTES` minutos (padrao: 3; aceita fracoes, ex: `0.5`). Valores invalidos usam o padrao de 3 minutos.
+
+#### Permissoes do coletor no cluster (RBAC)
+
+O coletor lista eventos `Warning` de todos os namespaces via API `events.k8s.io/v1`. Localmente ele usa o kubeconfig (`~/.kube/config` ou `KUBECONFIG`); dentro do cluster, a ServiceAccount do pod. Em ambos os casos a identidade precisa da permissao minima abaixo (ajuste `namespace` e nome da ServiceAccount):
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aiops-event-collector
+rules:
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-event-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aiops-event-collector
+subjects:
+  - kind: ServiceAccount
+    name: aiops-agent
+    namespace: aiops
+```
+
+Sem essa permissao, a API responde 403 e o coletor registra no log a permissao necessaria, tentando novamente no proximo ciclo. A aplicacao assume **uma unica instancia** (um worker uvicorn / uma replica): multiplas instancias duplicariam a coleta.
+
 ### 4. Subir o banco de dados
 
 O Docker provisiona **apenas o banco** (PostgreSQL + pgAdmin):
@@ -80,7 +112,7 @@ src/my_agent_app/
 ├── web/router.py        # Pagina inicial (Jinja2)
 ├── templates/           # Templates HTML (dark theme)
 ├── agents/              # (placeholder) Agentes LangChain + MCP
-├── collector/           # (placeholder) Loop de coleta de dados
+├── collector/           # Loop de coleta de eventos Warning do cluster
 └── models/              # (placeholder) Modelos e queries
 ```
 
