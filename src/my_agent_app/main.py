@@ -7,7 +7,9 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from my_agent_app.agents import config as agent_config
@@ -18,6 +20,7 @@ from my_agent_app.collector.handler import EventHandler
 from my_agent_app.collector.loop import EventCollector
 from my_agent_app.database import get_database_url
 from my_agent_app.models.repository import ReportRepository
+from my_agent_app.web.router import NOT_FOUND_MESSAGE, render_error
 from my_agent_app.web.router import router as web_router
 
 logger = logging.getLogger(__name__)
@@ -72,3 +75,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="My Agent App", lifespan=lifespan)
 app.include_router(api_router)
 app.include_router(web_router)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    # Paginas de relatorio com ID malformado: 404 em HTML; o resto da API segue com 422 JSON
+    if request.url.path.startswith("/reports/"):
+        return render_error(request, 404, NOT_FOUND_MESSAGE, "Não encontrado")
+    return await request_validation_exception_handler(request, exc)

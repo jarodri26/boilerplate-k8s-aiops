@@ -124,6 +124,18 @@ A aplicacao roda localmente via `uv`:
 uv run uvicorn meu_agente.main:app --host 0.0.0.0 --port 8000
 ```
 
+## Interface web
+
+Com a aplicacao no ar, os relatorios de diagnostico ficam em `http://localhost:8000/reports` (link "Relatorios" no cabecalho):
+
+| Rota | Descricao |
+|------|-----------|
+| `GET /reports` | Listagem de todos os relatorios (mais recentes primeiro) com status e severidade |
+| `GET /reports/{id}` | Detalhe com o Markdown do relatorio renderizado (HTML sanitizado com `nh3`) |
+| `POST /reports/{id}/fix` | Botao "Executar correcao" (COMPLETO ou FALHA_CORRECAO). Ate o PRD 004, apenas volta ao detalhe com "Correcao ainda nao disponivel" |
+
+**A v1 nao tem autenticacao.** Nao exponha a aplicacao publicamente: restrinja o acesso pela rede (VPN, ingress interno, port-forward).
+
 ## Testes
 
 ```bash
@@ -139,7 +151,7 @@ src/my_agent_app/
 ├── main.py              # FastAPI + lifespan
 ├── database.py          # Base declarativa + DATABASE_URL
 ├── api/router.py        # Health check
-├── web/router.py        # Pagina inicial (Jinja2)
+├── web/                 # Pagina inicial e relatorios (Jinja2 + Markdown sanitizado)
 ├── templates/           # Templates HTML (dark theme)
 ├── agents/              # Agente de analise de causa raiz (LangChain + Claude + MCP)
 ├── collector/           # Coleta de eventos Warning + pipeline de analise (handler)

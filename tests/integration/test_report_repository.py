@@ -208,3 +208,27 @@ async def test_replace_batch_recusado_se_batch_ja_liberado(sessionmaker, repo):
 
     reports = await _all(sessionmaker)
     assert [(r.id, r.status) for r in reports] == [(batch_id, ReportStatus.INCOMPLETO)]
+
+
+# --- leituras da interface web (PRD 003) ------------------------------------------------
+
+
+async def test_list_reports_ordena_por_created_at_decrescente(sessionmaker, repo):
+    antigo = await _add(sessionmaker, ReportStatus.COMPLETO, ["u1"], age=timedelta(hours=2))
+    novo = await _add(sessionmaker, ReportStatus.INCOMPLETO, ["u2"])
+    meio = await _add(sessionmaker, ReportStatus.CORRIGIDO, ["u3"], age=timedelta(hours=1))
+
+    assert [r.id for r in await repo.list_reports()] == [novo, meio, antigo]
+
+
+async def test_list_reports_vazio(repo):
+    assert await repo.list_reports() == []
+
+
+async def test_get_report(sessionmaker, repo):
+    report_id = await _add(sessionmaker, ReportStatus.COMPLETO, ["u1"])
+
+    report = await repo.get_report(report_id)
+
+    assert report.id == report_id and report.status == ReportStatus.COMPLETO
+    assert await repo.get_report(uuid.uuid4()) is None

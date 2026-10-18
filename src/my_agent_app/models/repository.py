@@ -19,10 +19,19 @@ class ReportDraft(Protocol):
 
 
 class ReportRepository:
-    """Queries da tabela reports usadas pelo pipeline de analise (PRD 002)."""
+    """Queries da tabela reports: pipeline de analise (PRD 002) e interface web (PRD 003)."""
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]):
         self._sessionmaker = sessionmaker
+
+    async def list_reports(self) -> list[Report]:
+        async with self._sessionmaker() as session:
+            result = await session.execute(select(Report).order_by(Report.created_at.desc()))
+            return list(result.scalars())
+
+    async def get_report(self, report_id: uuid.UUID) -> Report | None:
+        async with self._sessionmaker() as session:
+            return await session.get(Report, report_id)
 
     async def recover_on_startup(self) -> int:
         """Analises interrompidas por crash/restart: EM_ANALISE -> INCOMPLETO."""
