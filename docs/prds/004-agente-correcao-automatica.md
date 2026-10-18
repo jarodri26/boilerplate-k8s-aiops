@@ -12,7 +12,7 @@ references: []
 
 ## 1. Contexto
 
-- **Sistema/produto**: Agente AIOps para Kubernetes — aplicação Python com FastAPI, LangChain e MCP Server Kubernetes. O PRD 002 gera relatórios com causa raiz e passos de correção. O PRD 003 fornece a interface web com botão para acionar a correção. Stack: Python, FastAPI, LangChain, Claude Sonnet, MCP Server Kubernetes.
+- **Sistema/produto**: Agente AIOps para Kubernetes — aplicação Python com FastAPI, LangChain e MCP Server Kubernetes. O PRD 002 gera relatórios com causa raiz e passos de correção. O PRD 003 fornece a interface web com botão para acionar a correção. Stack: Python, FastAPI, LangChain, Claude, MCP Server Kubernetes.
 - **Estado atual**: Relatórios de análise são gerados com passos de correção recomendados, mas a execução é manual — o operador precisa ler o relatório, interpretar os passos e executar os comandos no cluster manualmente.
 - **Problema**: A correção manual adiciona tempo ao MTTR e está sujeita a erros de execução. Mesmo com um bom diagnóstico automatizado, o benefício é parcial se a correção continua dependendo de intervenção humana.
 
@@ -47,15 +47,17 @@ Como SRE, quero poder acionar a correção automática de um problema a partir d
 
 **Rules:**
 - O acionamento é feito via endpoint `POST /reports/{id}/fix` na camada web (`web/router.py`, mesma família das rotas `/reports/{id}`)
-- O endpoint valida que o relatório existe e tem status COMPLETO ou FALHA_CORRECAO (nova tentativa após falha de correção); qualquer outro status retorna `409 Conflict`
+- O endpoint valida que o relatório existe e tem status COMPLETO ou FALHA_CORRECAO (nova tentativa após falha de correção); qualquer outro status retorna `409 Conflict`, renderizado em HTML como a página de detalhe com a mensagem "Correção já em andamento" (status CORRIGINDO) ou "Correção não permitida para relatórios com status X" (demais casos) — ver §9 D2
 - A transição para CORRIGINDO é feita por UPDATE condicional atômico (`UPDATE reports SET status='CORRIGINDO' WHERE id=:id AND status IN ('COMPLETO','FALHA_CORRECAO') RETURNING id`); se nenhuma linha for atualizada, o endpoint retorna `409 Conflict` — isso evita que duas requisições concorrentes disparem dois agentes de correção para o mesmo relatório (corrida TOCTOU)
 - A transição para CORRIGINDO acontece de forma síncrona no request (antes de responder), garantindo que o `409 Conflict` de concorrência seja decidido antes da resposta; a correção em si roda em background via `BackgroundTasks` do FastAPI (sem fila externa). Semanticamente é um `202 Accepted` (aceito e processado de forma assíncrona), mas — por ser acionado por um `<form method="post">` no browser — o endpoint responde `303 See Other` redirecionando para `GET /reports/{id}`; o usuário vê o badge CORRIGINDO e acompanha a evolução via refresh da página (sem JS/polling no v1). O trabalho roda in-process e é perdido em caso de restart — daí a recuperação de startup descrita abaixo
 - O `BackgroundTask` NÃO reutiliza a sessão do request (que é fechada junto com a resposta 303): ele abre a sua própria `AsyncSession` a partir de `app.state.sessionmaker` e recebe apenas o `report_id` (UUID), nunca o objeto ORM ligado à sessão do request — mesmo padrão do coletor de eventos
-- O resultado da correção é consultado pela página de detalhe do relatório (PRD 003), que exibe o status atualizado e o **feedback da correção** (resposta do agente: Ações Executadas + validação) persistido na coluna `correction_result`, numa seção "Resultado da Correção"
+- O resultado da correção é consultado pela página de detalhe do relatório (PRD 003), que exibe o status atualizado e o **feedback da correção** (resposta do agente: Ações Executadas + validação) persistido na coluna `correction_result`, numa seção "Resultado da Correção" (Markdown sanitizado como o relatório). A coluna é zerada na transição para CORRIGINDO e, ao final, recebe sempre um texto: a resposta do agente ou uma mensagem fixa quando não houver resposta (ver §9 D4)
+- O status final é gravado por UPDATE condicional (`WHERE id=:id AND status='CORRIGINDO'`); se nenhuma linha for atualizada, o resultado é descartado com warning (ver §9 D5)
+- A correção tem prazo total `CORRECTION_TIMEOUT_MINUTES` (padrão 10) via `asyncio.wait_for`; estouro → FALHA_CORRECAO (ver §9 D3)
 - O agente é construído com LangChain e se conecta ao cluster via MCP Server Kubernetes (Flux159), usando `langchain-mcp-adapters` para conectar por HTTP (`streamable_http`) ao MCP executado localmente via `npx` (transport HTTP/streamable) em `MCP_SERVER_URL` (padrão `http://localhost:3001/mcp`) — mesmo padrão do PRD 002
-- O modelo é configurável via variável de ambiente `AGENT_MODEL_NAME` (padrão: `claude-haiku-4-5`), reutilizando a mesma env var do PRD 002
-- Ao contrário do agente de análise, todas as tools do MCP Server são expostas ao agente de correção (acesso irrestrito, conforme decisão-chave 2)
-- O número máximo de iterações é configurável via `CORRECTION_MAX_ITERATIONS` (padrão: 25), implementado com `ModelCallLimitMiddleware(run_limit, exit_behavior="end")`; ao atingir o limite o run termina graciosamente (sem nova chamada ao modelo) e a resposta final não segue o formato `CORRIGIDO:/FALHA:`, de modo que o parsing da primeira linha (ver abaixo) a classifica como FALHA_CORRECAO — não há detecção separada de "limite atingido"
+- O modelo é configurável via `CORRECTION_MODEL_NAME`, cujo padrão é o valor de `AGENT_MODEL_NAME` do PRD 002 (`claude-haiku-4-5` se nada for configurado) — ver §9 D7
+- Ao contrário do agente de análise, todas as tools do MCP Server são expostas ao agente de correção (acesso irrestrito, conforme decisão-chave 2), exceto as que alteram o estado do próprio MCP Server: `kubectl_context`, `port_forward`, `stop_port_forward` e `cleanup` (ver §9 D1)
+- O número máximo de iterações é configurável via `CORRECTION_MAX_ITERATIONS` (padrão: 25), implementado com `ModelCallLimitMiddleware(run_limit, exit_behavior="end")`; ao atingir o limite o run termina graciosamente (sem nova chamada ao modelo) e a resposta final não segue o formato `CORRIGIDO:/FALHA:`, de modo que o parsing do veredito (ver abaixo) a classifica como FALHA_CORRECAO — não há detecção separada de "limite atingido"
 - O relatório de análise inteiro (conteúdo Markdown) é injetado no prompt do agente (`{report_markdown}`); ele interpreta os campos **Solucao** e **Comando sugerido** produzidos pelo PRD 002 (campos inline do bloco `## Problema N` do relatório, não seções `##` próprias) e traduz o comando sugerido em chamadas de tool MCP estruturadas (ex: `kubectl_patch`, `kubectl_scale`)
 - O agente executa os passos de correção no cluster via MCP
 - Na v1, o agente tem acesso irrestrito ao cluster
@@ -133,7 +135,7 @@ Depois da primeira linha, use o formato abaixo:
 
 > Nota: como cada relatório corresponde a um único problema (decisão do PRD 002), na prática a resposta terá apenas "Problema 1"; o formato suporta múltiplos problemas por robustez.
 
-**Parsing da resposta:** O **veredito** da resposta do agente determina o status do relatório no banco: uma linha que comece com `CORRIGIDO:` → status `CORRIGIDO`; com `FALHA:` → status `FALHA_CORRECAO`. O parser localiza o veredito em **qualquer linha** da resposta (não apenas a primeira), pois o agente costuma escrever um resumo em prosa antes do veredito; o token deve ancorar no início de uma linha (tolerando marcação Markdown como `-`, `*`, `#`, `>`) para não casar com menções no meio de frase. Se nenhum veredito for encontrado, tratar como `FALHA_CORRECAO` e registrar warning no log.
+**Parsing da resposta:** O **veredito** da resposta do agente determina o status do relatório no banco: uma linha que comece com `CORRIGIDO:` → status `CORRIGIDO`; com `FALHA:` → status `FALHA_CORRECAO`. O parser localiza o veredito em **qualquer linha** da resposta (não apenas a primeira), pois o agente costuma escrever um resumo em prosa antes do veredito; o token deve ancorar no início de uma linha (tolerando marcação Markdown como `-`, `*`, `#`, `>`) para não casar com menções no meio de frase. Se nenhum veredito for encontrado, ou se houver vereditos `CORRIGIDO:` e `FALHA:` na mesma resposta, tratar como `FALHA_CORRECAO` e registrar warning no log (ver §9 D6).
 
 **Edge cases:**
 - Passos de correção referenciam recursos que não existem mais → agente registra que o recurso não foi encontrado e continua com os próximos passos
@@ -143,6 +145,8 @@ Depois da primeira linha, use o formato abaixo:
 - Relatório com status diferente de COMPLETO ou FALHA_CORRECAO → endpoint rejeita com `409 Conflict`
 - Aplicação reinicia durante a correção → relatório órfão em CORRIGINDO é marcado como FALHA_CORRECAO no startup, permitindo nova tentativa pelo botão da interface (PRD 003)
 - Relatório não encontrado → endpoint retorna `404 Not Found`
+- Agente travado → prazo `CORRECTION_TIMEOUT_MINUTES` esgota e o status vira FALHA_CORRECAO
+- Duas correções de relatórios diferentes sobre o mesmo recurso → permitido na v1 (sem semáforo); limitação conhecida (ver §9 D8)
 
 ### US02: Verificação pós-correção
 
@@ -222,6 +226,8 @@ Como SRE, quero que o agente verifique se o problema foi resolvido após a corre
 | Transição COMPLETO/FALHA_CORRECAO → CORRIGINDO é atômica (rejeita concorrência) | Teste de concorrência: duas requisições simultâneas, apenas uma dispara a correção |
 | Relatório CORRIGINDO órfão é marcado FALHA_CORRECAO no startup | Teste simulando restart com relatório em CORRIGINDO |
 | Endpoint retorna 404 para relatório inexistente | Teste com ID inválido |
+| Tools `kubectl_context`, `port_forward`, `stop_port_forward` e `cleanup` não são expostas ao agente | Teste unitário do filtro de tools |
+| Veredito ausente, ambíguo ou prazo esgotado resulta em FALHA_CORRECAO com `correction_result` preenchido | Teste unitário do parser e do pipeline |
 
 ### De negócio
 
@@ -239,8 +245,9 @@ Como SRE, quero que o agente verifique se o problema foi resolvido após a corre
 **Funcionalidades:** US01, US02
 
 - [ ] Implementar endpoint `POST /reports/{id}/fix` aceitando status COMPLETO ou FALHA_CORRECAO, com transição atômica para CORRIGINDO (UPDATE condicional) e dispatch assíncrono via `BackgroundTasks` (US01)
-- [ ] Configurar agente LangChain com `AGENT_MODEL_NAME` (padrão `claude-haiku-4-5`) e MCP Server Kubernetes via `langchain-mcp-adapters` (MCP via `npx` com transport HTTP/streamable, conexão `streamable_http` em `MCP_SERVER_URL`), expondo todas as tools do MCP (acesso irrestrito) (US01)
-- [ ] Implementar limite de iterações via `CORRECTION_MAX_ITERATIONS` (padrão: 25) com `ModelCallLimitMiddleware(run_limit, exit_behavior="end")`; ao atingir o limite, a classificação FALHA_CORRECAO vem do fallback de parsing da primeira linha (sem detecção separada) (US01)
+- [ ] Configurar agente LangChain com `CORRECTION_MODEL_NAME` (padrão = `AGENT_MODEL_NAME`) e MCP Server Kubernetes via `langchain-mcp-adapters` (MCP via `npx` com transport HTTP/streamable, conexão `streamable_http` em `MCP_SERVER_URL`), expondo todas as tools do MCP exceto `kubectl_context`/`port_forward`/`stop_port_forward`/`cleanup` (US01)
+- [ ] Implementar limite de iterações via `CORRECTION_MAX_ITERATIONS` (padrão: 25) com `ModelCallLimitMiddleware(run_limit, exit_behavior="end")`; ao atingir o limite, a classificação FALHA_CORRECAO vem do fallback do parsing do veredito (sem detecção separada) (US01)
+- [ ] Implementar prazo total `CORRECTION_TIMEOUT_MINUTES` (padrão 10) e a coluna `correction_result` com a seção "Resultado da Correção" no detalhe (US01)
 - [ ] Implementar leitura do relatório e extração dos passos de correção (US01)
 - [ ] Implementar execução dos passos via MCP (US01)
 - [ ] Atualizar status do relatório (CORRIGINDO → CORRIGIDO/FALHA_CORRECAO) (US01, US02)
@@ -280,3 +287,45 @@ Como SRE, quero que o agente verifique se o problema foi resolvido após a corre
 - [MCP Server Kubernetes (Flux159)](https://github.com/Flux159/mcp-server-kubernetes) — servidor MCP utilizado pelo agente
 
 ## 9. Registro de Decisões
+
+Decisões D1–D8 tomadas em 2026-10-18, na exploração de design que antecede o change `agente-correcao-automatica`.
+
+### D1 — Tools operacionais do MCP excluídas
+
+- **Decisão**: o agente de correção recebe todas as tools do MCP Server **exceto** `kubectl_context`, `port_forward`, `stop_port_forward` e `cleanup`.
+- **Justificativa**: não é uma whitelist de segurança (a decisão-chave 2 continua valendo: o agente pode alterar e deletar recursos sem restrição). São tools que alteram o estado do **próprio MCP Server**, compartilhado com o agente de análise: `kubectl_context` poderia apontar ambos os agentes para outro cluster, `port_forward` deixa processos vivos no servidor e `cleanup` limpa recursos do servidor. Nenhuma delas é necessária para corrigir um recurso.
+
+### D2 — Recusa do `POST /fix` em HTML com status 409
+
+- **Decisão**: quando o relatório não está COMPLETO/FALHA_CORRECAO (ou o UPDATE condicional não atualiza nenhuma linha), o endpoint responde `409 Conflict` renderizando a página de detalhe do relatório com uma mensagem: "Correção já em andamento" se o status atual é CORRIGINDO, "Correção não permitida para relatórios com status X" nos demais casos.
+- **Justificativa**: cumpre o critério de aceite (409) sem deixar o usuário do formulário numa página de erro crua. A chave `?fix=indisponivel` do stub do PRD 003 deixa de ser usada.
+
+### D3 — Prazo total da correção
+
+- **Decisão**: `asyncio.wait_for` em volta do run do agente, com `CORRECTION_TIMEOUT_MINUTES` (padrão 10). Estouro → FALHA_CORRECAO.
+- **Justificativa**: não há recuperação de "estagnação" para CORRIGINDO (só a de startup); sem prazo, um agente travado deixaria o relatório em CORRIGINDO até o próximo restart.
+
+### D4 — Conteúdo de `correction_result`
+
+- **Decisão**: `correction_result` (TEXT, nulo) recebe sempre um texto ao final: a resposta do agente ou, na falta dela, uma mensagem fixa (sem resposta final / prazo esgotado / erro de MCP ou API, sem stack trace). A transição para CORRIGINDO zera a coluna (`NULL`). Só o último intento é guardado (sem histórico na v1). O Markdown é renderizado com a mesma sanitização (`nh3`) do relatório.
+- **Justificativa**: o operador sempre vê por que a correção terminou como terminou, e um novo intento não exibe o resultado do anterior.
+
+### D5 — Escrita final condicional
+
+- **Decisão**: o status final é gravado com `UPDATE ... WHERE id = :id AND status = 'CORRIGINDO'`. Se nenhuma linha for atualizada, o resultado é descartado com warning no log.
+- **Justificativa**: mesmo padrão do swap condicional do PRD 002 (D3/D5): não sobrescreve um relatório cujo estado já foi alterado por outro caminho (ex.: recuperação de startup).
+
+### D6 — Veredito ambíguo resolve para FALHA
+
+- **Decisão**: o parser procura o veredito em qualquer linha ancorada no início (tolerando `-`, `*`, `#`, `>` e negrito). Se houver linhas `CORRIGIDO:` e `FALHA:` na mesma resposta (ex.: o modelo copiou a lista do formato), o resultado é FALHA_CORRECAO. Prevalece sobre as menções a "primeira linha" no restante do documento.
+- **Justificativa**: na dúvida, não declarar sucesso.
+
+### D7 — Modelo da correção configurável à parte
+
+- **Decisão**: `CORRECTION_MODEL_NAME`, com padrão igual ao valor de `AGENT_MODEL_NAME` (portanto `claude-haiku-4-5` se nada for configurado).
+- **Justificativa**: sem mudança de comportamento por padrão, mas permite usar um modelo de maior capacidade só no agente que escreve no cluster.
+
+### D8 — Sem limite de concorrência entre correções
+
+- **Decisão**: correções de relatórios diferentes podem rodar em paralelo; não há semáforo na v1. O UPDATE condicional só impede duas correções do **mesmo** relatório.
+- **Justificativa**: um semáforo faria um relatório ficar CORRIGINDO esperando a vez, sem feedback na interface. O risco de duas correções tocarem o mesmo recurso fica registrado como limitação conhecida.

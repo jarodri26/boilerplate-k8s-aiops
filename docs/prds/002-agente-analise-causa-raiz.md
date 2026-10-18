@@ -57,7 +57,8 @@ Como SRE, quero que eventos ja vinculados a um relatorio ativo nao sejam reanali
 - Eventos vinculados a relatorios com status CORRIGIDO ou INCOMPLETO sao reanalisados (problema pode ter reincidido; analise nao concluida deve ser reavaliada ate o incidente ser resolvido)
 - A consulta de deduplicacao avalia a EXISTENCIA de qualquer relatorio ativo contendo o uid (overlap de arrays `event_uids && :uids` filtrado por status IN {EM_ANALISE, COMPLETO, CORRIGINDO, FALHA_CORRECAO}), **nunca** o status do relatorio mais recente: se ao menos um relatorio ativo contem o uid, o evento e ignorado — mesmo que exista tambem um relatorio antigo em CORRIGIDO/INCOMPLETO com o mesmo uid (ver §9, decisao D4)
 - A tabela de relatorios armazena o campo `event_uids` (`TEXT[]` com GIN index — lista de UIDs dos eventos Kubernetes analisados)
-- Relatorios em EM_ANALISE ha mais de `ANALYSIS_STALE_TIMEOUT_MINUTES` minutos (padrao: 30) sao marcados como INCOMPLETO durante a consulta de deduplicacao — recuperacao de analises estagnadas, complementar a recuperacao do startup
+- Relatorios em EM_ANALISE ha mais de `ANALYSIS_STALE_TIMEOUT_MINUTES` minutos (padrao: 30) sao marcados como INCOMPLETO durante a consulta de deduplicacao — recuperacao de analises estagnadas, complementar a recuperacao do startup. A idade e medida por `updated_at` (nao `created_at`), que e renovado quando a analise efetivamente inicia (ver US02, semaforo, e §9, decisao D7)
+- Eventos com `uid` vazio (contrato do PRD 001 devolve `""` quando `metadata.uid` esta ausente) sao descartados na entrada do handler com warning no log, antes da deduplicacao (ver §9, decisao D9)
 
 **Edge cases:**
 - Todos os eventos do batch ja estao em tratamento → nao disparar analise, aguardar proximo ciclo
@@ -77,6 +78,8 @@ Como SRE, quero que um agente de IA investigue automaticamente a causa raiz dos 
 - A investigacao segue o ciclo: analise → acao → reflexao → proxima acao
 - O agente itera ate identificar a causa raiz ou atingir o limite de iteracoes, configuravel via variavel de ambiente `AGENT_MAX_ITERATIONS` (padrao: 25), implementado com `ModelCallLimitMiddleware(run_limit, exit_behavior="end")` no `create_agent`. Com `exit_behavior="end"` o run encerra graciosamente sem uma chamada extra ao modelo — nao ha relatorio parcial garantido; a resposta final (possivelmente vazia ou sem secoes de problema identificaveis) mantem o relatorio do batch como INCOMPLETO (ver US03 edge cases)
 - O agente deve investigar o estado dos recursos relacionados ao evento (pod, deployment, node, etc.)
+- O numero de analises simultaneas e limitado por um `asyncio.Semaphore` configuravel via `ANALYSIS_MAX_CONCURRENCY` (padrao: 1). O semaforo e adquirido **depois** da criacao do relatorio EM_ANALISE (o batch fica marcado "em tratamento" enquanto aguarda na fila); ao adquiri-lo, o handler atualiza `updated_at` do relatorio, reiniciando a contagem do timeout de estagnacao (ver §9, decisao D7)
+- O run do agente tem prazo total configuravel via `AGENT_TIMEOUT_MINUTES` (padrao: 20), aplicado com `asyncio.wait_for`. O valor deve ser menor que `ANALYSIS_STALE_TIMEOUT_MINUTES`; se for maior ou igual, registrar warning no log e usar `ANALYSIS_STALE_TIMEOUT_MINUTES - 1`. Estouro do prazo → abortar, atualizar relatorio para INCOMPLETO e registrar erro (ver §9, decisao D6)
 
 **Prompt do agente:**
 
@@ -155,6 +158,7 @@ Repita a secao para cada problema. Responda APENAS com o relatorio markdown.
 - Erro na API do Claude (rate limit, timeout) → retry automatico do SDK com backoff exponencial (`max_retries=3` no `ChatAnthropic`); esgotadas as tentativas, abortar, atualizar relatorio para INCOMPLETO e registrar erro, sem propagacao ao coletor (despacho assincrono do PRD 001)
 - Evento ja corrigido entre a coleta e a analise → agente identifica estado saudavel e registra no relatorio
 - Variavel de ambiente `AGENT_MAX_ITERATIONS` com valor invalido (nao-numerico, negativo ou zero) → usar o padrao de 25 iteracoes e registrar warning no log
+- Variaveis `AGENT_TIMEOUT_MINUTES`, `ANALYSIS_MAX_CONCURRENCY` ou `ANALYSIS_STALE_TIMEOUT_MINUTES` com valor invalido (nao-numerico, negativo ou zero) → usar o respectivo padrao e registrar warning no log
 
 ### US03: Geracao e persistencia de relatorio estruturado
 
@@ -163,15 +167,18 @@ Como SRE, quero que cada investigacao produza um relatorio Markdown estruturado 
 **Rules:**
 - A resposta do agente segue a estrutura definida no prompt: resumo com contagem por severidade e uma secao por problema (severidade, namespace, recursos afetados, eventos, causa raiz, evidencias, solucao recomendada e comando sugerido)
 - Cada secao de problema e persistida como um relatorio proprio no PostgreSQL, com ID unico e os event_uids dos eventos daquele problema (mapeados pelo campo **Eventos** da resposta)
-- Durante a analise existe um unico relatorio EM_ANALISE por batch (com todos os event_uids); ao final, ele e substituido pelo conjunto de relatorios por problema na mesma transacao. A substituicao e **condicional ao status**: o swap so ocorre se o relatorio do batch ainda estiver EM_ANALISE — se ja tiver sido transicionado para INCOMPLETO (ex.: pelo timeout de estagnacao ou pela recuperacao de startup enquanto a analise ainda rodava), o swap e abortado e o resultado do agente e descartado, evitando reintroduzir relatorios para eventos ja liberados para reanalise (ver §9, decisao D3)
-- A tabela de relatorios armazena: id (`UUID`), conteudo markdown, status, event_uids (`TEXT[]` — UIDs dos eventos Kubernetes analisados), `created_at` e `updated_at` (timestamps de criacao e atualizacao)
+- O markdown de cada relatorio contem apenas a secao do seu problema (`## Problema N: ...` ate a proxima secao); a tabela **Resumo** da resposta descreve o batch e e descartada (ver §9, decisao D8)
+- Status de cada relatorio por problema: COMPLETO quando a secao tem `**Severidade:**` com valor valido (CRITICO, ALTO, MEDIO, BAIXO) e `### Causa Raiz` nao vazia e sem o termo "inconclusiv"; caso contrario, INCOMPLETO. O criterio vale inclusive quando o run atingiu o limite de iteracoes (ver §9, decisao D8)
+- Durante a analise existe um unico relatorio EM_ANALISE por batch (com todos os event_uids); ao final, ele e substituido pelo conjunto de relatorios por problema na mesma transacao. A substituicao e **condicional ao status**: o swap so ocorre se o relatorio do batch ainda estiver EM_ANALISE — se ja tiver sido transicionado para INCOMPLETO (ex.: pelo timeout de estagnacao ou pela recuperacao de startup enquanto a analise ainda rodava), o swap e abortado e o resultado do agente e descartado, evitando reintroduzir relatorios para eventos ja liberados para reanalise (ver §9, decisao D3). O swap e implementado como `DELETE ... WHERE id = :batch_id AND status = 'EM_ANALISE' RETURNING id` seguido dos INSERTs por problema na mesma transacao; DELETE sem linha retornada → rollback e descarte (ver §9, decisao D5)
+- A tabela de relatorios armazena: id (`UUID`), conteudo markdown, status, severity (`TEXT` nullable — severidade extraida do campo `**Severidade:**` no swap; nula no relatorio EM_ANALISE do batch e quando nao parseavel), event_uids (`TEXT[]` — UIDs dos eventos Kubernetes analisados), `created_at` e `updated_at` (timestamps de criacao e atualizacao)
+- O schema e versionado com Alembic (migration inicial criando a tabela e o GIN index em `event_uids`)
 - Status possiveis do relatorio: EM_ANALISE, COMPLETO, INCOMPLETO, CORRIGINDO, CORRIGIDO, FALHA_CORRECAO
 - Fluxo de status: EM_ANALISE → COMPLETO (analise OK) | INCOMPLETO (analise inconclusiva ou abortada por falha de infraestrutura); COMPLETO → CORRIGINDO → CORRIGIDO | FALHA_CORRECAO; FALHA_CORRECAO → CORRIGINDO (nova tentativa de correcao, PRD 004 — FALHA_CORRECAO nao e terminal)
 - Relatorios em EM_ANALISE encontrados no startup da aplicacao sao marcados como INCOMPLETO (recuperacao de analises interrompidas por crash/restart)
 
 **Edge cases:**
 - PostgreSQL indisponivel no momento da persistencia → retry com backoff; apos falha definitiva, registrar erro no log incluindo o conteudo Markdown gerado (sem fallback em arquivo); sem propagacao ao coletor (despacho assincrono do PRD 001). O relatorio EM_ANALISE estagnado e recuperado pelo timeout da deduplicacao (stale) ou no startup; evento one-shot afetado e perdido (risco aceito na v1)
-- Resposta do agente vazia ou sem secoes de problema identificaveis (falha do LLM) → manter o relatorio EM_ANALISE do batch como INCOMPLETO para rastreabilidade
+- Resposta do agente vazia ou sem secoes de problema identificaveis (falha do LLM ou limite de iteracoes sem resposta final) → manter o relatorio EM_ANALISE do batch como INCOMPLETO para rastreabilidade
 - Dois relatorios gerados simultaneamente para eventos relacionados → cada um recebe ID proprio; deduplicacao por `event_uids` impede reanalise nos ciclos futuros
 - Aplicacao reinicia durante uma analise → relatorio orfao em EM_ANALISE e marcado como INCOMPLETO no startup, liberando os eventos para reanalise
 - Evento do batch nao referenciado no campo **Eventos** de nenhum problema da resposta → registrar warning no log; o evento fica sem relatorio proprio e sera reanalisado apenas se recorrer (recoletado em um ciclo futuro)
@@ -253,7 +260,9 @@ Como SRE, quero que cada investigacao produza um relatorio Markdown estruturado 
 
 **Funcionalidades:** US01, US03 (modelo de dados)
 
-- [ ] Modelar tabela de relatorios no PostgreSQL (id `UUID`, markdown, status, event_uids `TEXT[]` com GIN index, `created_at`, `updated_at`) (US03)
+- [ ] Configurar Alembic e consolidar o engine async no `lifespan` (remover o engine de nivel de modulo de `database.py`; `sessionmaker` injetado no `EventHandler`) (US03)
+- [ ] Modelar tabela de relatorios no PostgreSQL (id `UUID`, markdown, status, severity `TEXT` nullable, event_uids `TEXT[]` com GIN index, `created_at`, `updated_at`) com migration inicial (US03)
+- [ ] Descartar eventos com `uid` vazio na entrada do handler (US01)
 - [ ] Implementar consulta de deduplicacao por `event_uids` e status do relatorio (US01)
 - [ ] Implementar logica de filtragem antes de disparar analise (US01)
 - [ ] Implementar criacao de relatorio com status EM_ANALISE antes de iniciar investigacao (US01, US03)
@@ -275,8 +284,10 @@ Como SRE, quero que cada investigacao produza um relatorio Markdown estruturado 
 - [ ] Configurar LangChain com Claude (`AGENT_MODEL_NAME`, padrao `claude-haiku-4-5`; Sonnet como override opcional) em loop de tool-calling via `create_agent` de `langchain.agents` (US02)
 - [ ] Configurar MCP Server Kubernetes (Flux159) via `langchain-mcp-adapters` (MCP executado via npx com transport HTTP/streamable, conexao `transport: "http"` em `MCP_SERVER_URL`), filtrando apenas as tools de leitura kubectl_get, kubectl_describe e kubectl_logs (US02)
 - [ ] Implementar logica de investigacao iterativa com limite de iteracoes configuravel via `AGENT_MAX_ITERATIONS`, usando `ModelCallLimitMiddleware` (US02)
-- [ ] Gerar relatorios Markdown por problema seguindo a estrutura do prompt, com mapeamento de event_uids pelo campo **Eventos** (US03)
-- [ ] Substituir o relatorio EM_ANALISE do batch pelos relatorios por problema com status COMPLETO/INCOMPLETO (US03)
+- [ ] Limitar analises simultaneas com semaforo (`ANALYSIS_MAX_CONCURRENCY`), renovando `updated_at` ao adquiri-lo (US02)
+- [ ] Aplicar prazo total ao run do agente com `asyncio.wait_for` (`AGENT_TIMEOUT_MINUTES` < `ANALYSIS_STALE_TIMEOUT_MINUTES`) (US02)
+- [ ] Gerar relatorios Markdown por problema seguindo a estrutura do prompt, com mapeamento de event_uids pelo campo **Eventos** e extracao de severidade (US03)
+- [ ] Substituir o relatorio EM_ANALISE do batch pelos relatorios por problema com status COMPLETO/INCOMPLETO via `DELETE ... RETURNING` condicional (US03)
 - [ ] Configurar `max_retries=3` no `ChatAnthropic` (retry com backoff nativo do SDK) (US02)
 
 **Criterio de conclusao:**
@@ -344,3 +355,30 @@ Decisoes tomadas em 2026-07-22, apos revisao de design e verificacao das APIs (L
 
 - **Decisao**: a dedup avalia a EXISTENCIA de qualquer relatorio ativo contendo o uid (overlap `event_uids && :uids` com status ativo), nunca o status do relatorio mais recente.
 - **Justificativa**: um mesmo uid pode aparecer em varios relatorios ao longo do tempo (ex.: CORRIGIDO antigo + EM_ANALISE atual); avaliar apenas o mais recente poderia liberar indevidamente um evento ja em tratamento.
+
+Decisoes D5–D9 tomadas em 2026-10-18, na exploracao de design que antecede o change `agente-analise-causa-raiz`.
+
+### D5 — Swap atomico via `DELETE ... RETURNING`
+
+- **Decisao**: o swap do D3 e `DELETE FROM reports WHERE id = :batch_id AND status = 'EM_ANALISE' RETURNING id` seguido dos INSERTs por problema, na mesma transacao. Nenhuma linha retornada → rollback e descarte do resultado.
+- **Justificativa**: a checagem de status e a remocao acontecem em um unico statement, sem janela entre leitura e escrita e sem lock explicito.
+
+### D6 — Prazo total do run do agente
+
+- **Decisao**: `asyncio.wait_for` em volta do run, com `AGENT_TIMEOUT_MINUTES` (padrao 20). Valor >= `ANALYSIS_STALE_TIMEOUT_MINUTES` gera warning e e substituido por `ANALYSIS_STALE_TIMEOUT_MINUTES - 1`. Estouro → INCOMPLETO.
+- **Justificativa**: o D3 exige que o stale timeout fique acima do pior caso de runtime do agente; sem prazo explicito esse pior caso e desconhecido (25 chamadas ao modelo + tools MCP + retries). O prazo transforma a premissa em garantia.
+
+### D7 — Semaforo de concorrencia e relogio do stale
+
+- **Decisao**: `asyncio.Semaphore(ANALYSIS_MAX_CONCURRENCY)` (padrao 1), adquirido depois do INSERT EM_ANALISE. Ao adquirir, `updated_at` do relatorio e renovado; o timeout de estagnacao passa a ser medido por `updated_at`.
+- **Justificativa**: o despacho do PRD 001 e fire-and-forget, sem limite; uma tempestade de eventos abriria analises em paralelo sem teto de custo/rate limit. Adquirir depois do insert mantem o batch marcado "em tratamento" enquanto aguarda (evento reenviado nao e enfileirado de novo); renovar `updated_at` evita que um batch parado na fila seja marcado stale antes de iniciar.
+
+### D8 — Conteudo e status dos relatorios por problema
+
+- **Decisao**: cada relatorio guarda apenas a secao do seu problema (a tabela **Resumo** e descartada). Status COMPLETO quando a secao tem `**Severidade:**` valida e `### Causa Raiz` nao vazia sem "inconclusiv"; senao INCOMPLETO. A severidade parseada e gravada na coluna `severity`.
+- **Justificativa**: o Resumo descreve o batch, nao o problema. O criterio de status precisa ser deterministico para ser testavel. A coluna `severity` evita que o PRD 003 reparseie o markdown a cada listagem e mantem o parse em um unico modulo.
+
+### D9 — Eventos sem uid
+
+- **Decisao**: eventos com `uid` vazio sao descartados na entrada do handler com warning.
+- **Justificativa**: o contrato do PRD 001 devolve `""` quando `metadata.uid` falta; `""` em `event_uids` colidiria na deduplicacao entre eventos nao relacionados.

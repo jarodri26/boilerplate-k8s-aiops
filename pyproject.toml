@@ -16,6 +16,8 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "markdown>=3.10.2",
     "httpx>=0.28.1",
+    "kubernetes>=37.0.1",
+    "nh3>=0.3.7",
 ]
 
 [tool.uv]
@@ -25,5 +27,15 @@ package = true
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/my_agent_app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

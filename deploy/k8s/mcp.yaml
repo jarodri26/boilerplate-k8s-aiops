@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-mcp
+  namespace: aiops-system
+  labels:
+    app: aiops-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiops-mcp
+  template:
+    metadata:
+      labels:
+        app: aiops-mcp
+    spec:
+      serviceAccountName: aiops-mcp
+      containers:
+        - name: mcp
+          image: flux159/mcp-server-kubernetes:v4.1.9
+          env:
+            - name: ENABLE_UNSAFE_STREAMABLE_HTTP_TRANSPORT
+              value: "1"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "3001"
+            # Protecao contra DNS rebinding: aceita so o Host do Service (aiops-mcp:3001)
+            - name: DNS_REBINDING_ALLOWED_HOST
+              value: "aiops-mcp:3001"
+          ports:
+            - name: http
+              containerPort: 3001
+          # A inicializacao pode passar de 1 minuto; ate 3 min antes do liveness assumir
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-mcp
+  namespace: aiops-system
+spec:
+  selector:
+    app: aiops-mcp
+  ports:
+    - name: http
+      port: 3001
+      targetPort: http
+---
+# So a aplicacao fala com o MCP (que tem cluster-admin)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aiops-mcp-only-from-agent
+  namespace: aiops-system
+spec:
+  podSelector:
+    matchLabels:
+      app: aiops-mcp
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: aiops-agent
+      ports:
+        - port: 3001

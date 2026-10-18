@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiops-agent-config
+  namespace: aiops-system
+data:
+  MCP_SERVER_URL: "http://aiops-mcp:3001/mcp"
+  EVENT_COLLECTION_INTERVAL_MINUTES: "3"
+  AGENT_MODEL_NAME: "claude-haiku-4-5"
+  AGENT_MAX_ITERATIONS: "25"
+  AGENT_TIMEOUT_MINUTES: "20"
+  ANALYSIS_MAX_CONCURRENCY: "1"
+  ANALYSIS_STALE_TIMEOUT_MINUTES: "30"
+  CORRECTION_MAX_ITERATIONS: "25"
+  CORRECTION_TIMEOUT_MINUTES: "10"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-agent
+  namespace: aiops-system
+  labels:
+    app: aiops-agent
+spec:
+  # Uma unica instancia: multiplas replicas duplicariam a coleta de eventos.
+  # Recreate garante que a antiga para antes da nova subir.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: aiops-agent
+  template:
+    metadata:
+      labels:
+        app: aiops-agent
+    spec:
+      serviceAccountName: aiops-agent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      initContainers:
+        - name: migrate
+          image: aiops-agent:dev
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - secretRef:
+                name: aiops-agent-secrets
+      containers:
+        - name: app
+          image: aiops-agent:dev
+          envFrom:
+            - configMapRef:
+                name: aiops-agent-config
+            - secretRef:
+                name: aiops-agent-secrets
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+# ClusterIP apenas: a v1 nao tem autenticacao; acesse via port-forward/VPN/ingress interno
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-agent
+  namespace: aiops-system
+spec:
+  selector:
+    app: aiops-agent
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
