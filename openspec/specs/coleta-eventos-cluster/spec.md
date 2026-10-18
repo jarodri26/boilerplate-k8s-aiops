@@ -111,20 +111,20 @@ Cada evento entregue SHALL ser um dict com as chaves `uid`, `type`, `reason`, `m
 - **WHEN** a recência do evento é `deprecatedLastTimestamp`
 - **THEN** `timestamp` contém esse valor formatado em ISO 8601
 
-### Requirement: Despacho assíncrono do batch ao handler
-Os eventos de um ciclo SHALL ser entregues juntos, como uma única lista, ao handler de eventos, sem limite de quantidade. O despacho SHALL ser fire-and-forget: o coletor não aguarda o processamento. Se não houver eventos a entregar, o handler SHALL NOT ser acionado. Nesta fase, o handler imprime os eventos no stdout.
+### Requirement: Despacho assíncrono do batch ao pipeline de análise
+Os eventos de um ciclo SHALL ser entregues juntos, como uma única lista, ao pipeline de análise de causa raiz, sem limite de quantidade. O despacho SHALL ser fire-and-forget: o coletor não aguarda o processamento. Se não houver eventos a entregar, o pipeline SHALL NOT ser acionado.
 
 #### Scenario: Batch entregue sem bloquear o coletor
-- **WHEN** um ciclo coleta 3 eventos e o handler demora mais que o intervalo para processá-los
-- **THEN** o handler recebe uma única lista com os 3 eventos e o próximo ciclo de coleta inicia no horário previsto
+- **WHEN** um ciclo coleta 3 eventos e a análise demora mais que o intervalo para processá-los
+- **THEN** o pipeline recebe uma única lista com os 3 eventos e o próximo ciclo de coleta inicia no horário previsto
 
 #### Scenario: Nenhum evento no ciclo
 - **WHEN** um ciclo não encontra eventos a entregar
-- **THEN** o handler não é acionado
+- **THEN** o pipeline de análise não é acionado
 
-#### Scenario: Handler placeholder
-- **WHEN** o handler recebe um batch
-- **THEN** os eventos são impressos no stdout
+#### Scenario: Batch encaminhado à análise
+- **WHEN** um ciclo coleta eventos
+- **THEN** os eventos são encaminhados ao pipeline de análise de causa raiz, e não mais impressos no stdout
 
 ### Requirement: Resiliência a falhas
 Falhas na comunicação com o cluster, falta de permissão (RBAC) ou erros do handler SHALL ser registrados no log sem interromper o loop de coleta. Erros do handler SHALL NOT afetar a marca d'água.
