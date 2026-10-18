@@ -53,6 +53,8 @@ class Report(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     severity: Mapped[str | None] = mapped_column(Text, nullable=True)
     event_uids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    # Resposta do agente de correcao (PRD 004) ou mensagem fixa; nulo ate uma correcao terminar
+    correction_result: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

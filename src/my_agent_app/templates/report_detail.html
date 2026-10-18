@@ -50,6 +50,7 @@
         .markdown-body th, .markdown-body td { border: 1px solid #334155; padding: 0.4rem 0.75rem; }
         .markdown-body th { background: #0f172a; }
         .markdown-body hr { border: none; border-top: 1px solid #334155; margin: 1rem 0; }
+        .section-title { font-size: 1.1rem; margin-bottom: 0.75rem; }
 {% endblock %}
 
 {% block content %}
@@ -69,6 +70,15 @@
 <article class="markdown-body">
     {{ content }}
 </article>
+
+{% if correction_result %}
+<section class="correction-result">
+    <h3 class="section-title">Resultado da Correção</h3>
+    <div class="markdown-body">
+        {{ correction_result }}
+    </div>
+</section>
+{% endif %}
 
 {% if can_fix %}
 <form method="post" action="/reports/{{ report.id }}/fix">

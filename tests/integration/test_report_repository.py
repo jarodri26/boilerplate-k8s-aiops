@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -6,7 +7,11 @@ import pytest
 from sqlalchemy import select, update
 
 from my_agent_app.models.report import Report, ReportStatus
-from my_agent_app.models.repository import ReportRepository
+from my_agent_app.models.repository import (
+    CORRECTION_INTERRUPTED_MESSAGE,
+    ReportRepository,
+    StartupRecovery,
+)
 
 STALE = 30 * 60
 
@@ -45,16 +50,18 @@ async def _get(sessionmaker, report_id) -> Report | None:
 # --- 2.1 recover_on_startup ---------------------------------------------------------
 
 
-async def test_recover_on_startup_marca_em_analise_como_incompleto(sessionmaker, repo):
+async def test_recover_on_startup_marca_orfaos(sessionmaker, repo):
     orfao = await _add(sessionmaker, ReportStatus.EM_ANALISE, ["u1"])
     completo = await _add(sessionmaker, ReportStatus.COMPLETO, ["u2"])
     corrigindo = await _add(sessionmaker, ReportStatus.CORRIGINDO, ["u3"])
 
-    assert await repo.recover_on_startup() == 1
+    assert await repo.recover_on_startup() == StartupRecovery(analyses=1, corrections=1)
 
     assert (await _get(sessionmaker, orfao)).status == ReportStatus.INCOMPLETO
     assert (await _get(sessionmaker, completo)).status == ReportStatus.COMPLETO
-    assert (await _get(sessionmaker, corrigindo)).status == ReportStatus.CORRIGINDO
+    recuperado = await _get(sessionmaker, corrigindo)
+    assert recuperado.status == ReportStatus.FALHA_CORRECAO
+    assert recuperado.correction_result == CORRECTION_INTERRUPTED_MESSAGE
 
 
 # --- 2.2 register_batch -----------------------------------------------------------
@@ -232,3 +239,77 @@ async def test_get_report(sessionmaker, repo):
 
     assert report.id == report_id and report.status == ReportStatus.COMPLETO
     assert await repo.get_report(uuid.uuid4()) is None
+
+
+# --- PRD 004: transicoes de correcao ----------------------------------------------
+
+
+async def _set_result(sessionmaker, report_id, result):
+    async with sessionmaker.begin() as session:
+        await session.execute(
+            update(Report).where(Report.id == report_id).values(correction_result=result)
+        )
+
+
+@pytest.mark.parametrize("status", [ReportStatus.COMPLETO, ReportStatus.FALHA_CORRECAO])
+async def test_start_correction_de_status_elegivel(sessionmaker, repo, status):
+    report_id = await _add(sessionmaker, status, ["u1"], age=timedelta(hours=1))
+    await _set_result(sessionmaker, report_id, "FALHA: tentativa anterior")
+    before = (await _get(sessionmaker, report_id)).updated_at
+
+    assert await repo.start_correction(report_id) is True
+
+    report = await _get(sessionmaker, report_id)
+    assert report.status == ReportStatus.CORRIGINDO
+    assert report.correction_result is None
+    assert report.updated_at > before
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        ReportStatus.EM_ANALISE,
+        ReportStatus.INCOMPLETO,
+        ReportStatus.CORRIGINDO,
+        ReportStatus.CORRIGIDO,
+    ],
+)
+async def test_start_correction_recusa_status_nao_elegivel(sessionmaker, repo, status):
+    report_id = await _add(sessionmaker, status, ["u1"])
+
+    assert await repo.start_correction(report_id) is False
+    assert (await _get(sessionmaker, report_id)).status == status
+
+
+async def test_start_correction_de_relatorio_inexistente(repo):
+    assert await repo.start_correction(uuid.uuid4()) is False
+
+
+async def test_start_correction_concorrente_so_uma_vence(sessionmaker, repo):
+    report_id = await _add(sessionmaker, ReportStatus.COMPLETO, ["u1"])
+    other = ReportRepository(sessionmaker)  # cada chamada abre sua propria sessao
+
+    results = await asyncio.gather(repo.start_correction(report_id), other.start_correction(report_id))
+
+    assert sorted(results) == [False, True]
+
+
+async def test_finish_correction_grava_status_e_resultado(sessionmaker, repo):
+    report_id = await _add(sessionmaker, ReportStatus.CORRIGINDO, ["u1"])
+
+    assert await repo.finish_correction(report_id, ReportStatus.CORRIGIDO, "CORRIGIDO: ok") is True
+
+    report = await _get(sessionmaker, report_id)
+    assert report.status == ReportStatus.CORRIGIDO
+    assert report.correction_result == "CORRIGIDO: ok"
+
+
+async def test_finish_correction_ignorado_se_status_mudou(sessionmaker, repo):
+    report_id = await _add(sessionmaker, ReportStatus.FALHA_CORRECAO, ["u1"])
+    await _set_result(sessionmaker, report_id, CORRECTION_INTERRUPTED_MESSAGE)
+
+    assert await repo.finish_correction(report_id, ReportStatus.CORRIGIDO, "CORRIGIDO: ok") is False
+
+    report = await _get(sessionmaker, report_id)
+    assert report.status == ReportStatus.FALHA_CORRECAO
+    assert report.correction_result == CORRECTION_INTERRUPTED_MESSAGE

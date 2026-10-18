@@ -11,6 +11,9 @@ ENVS = [
     "AGENT_TIMEOUT_MINUTES",
     "ANALYSIS_MAX_CONCURRENCY",
     "ANALYSIS_STALE_TIMEOUT_MINUTES",
+    "CORRECTION_MODEL_NAME",
+    "CORRECTION_MAX_ITERATIONS",
+    "CORRECTION_TIMEOUT_MINUTES",
 ]
 
 
@@ -71,3 +74,38 @@ def test_timeout_maior_ou_igual_ao_stale_e_limitado(monkeypatch, caplog, raw):
     with caplog.at_level(logging.WARNING):
         assert config.get_agent_timeout_seconds(30 * 60) == 29 * 60
     assert "AGENT_TIMEOUT_MINUTES" in caplog.text
+
+
+# --- PRD 004: agente de correcao --------------------------------------------------
+
+
+def test_padroes_da_correcao():
+    assert config.get_correction_model_name() == "claude-haiku-4-5"
+    assert config.get_correction_max_iterations() == 25
+    assert config.get_correction_timeout_seconds() == 10 * 60
+
+
+def test_modelo_da_correcao_herda_o_da_analise(monkeypatch):
+    monkeypatch.setenv("AGENT_MODEL_NAME", "claude-sonnet-4-5")
+    assert config.get_correction_model_name() == "claude-sonnet-4-5"
+
+    monkeypatch.setenv("CORRECTION_MODEL_NAME", "claude-opus-x")
+    assert config.get_correction_model_name() == "claude-opus-x"
+
+
+def test_valores_validos_da_correcao(monkeypatch):
+    monkeypatch.setenv("CORRECTION_MAX_ITERATIONS", "7")
+    monkeypatch.setenv("CORRECTION_TIMEOUT_MINUTES", "2.5")
+    assert config.get_correction_max_iterations() == 7
+    assert config.get_correction_timeout_seconds() == 150
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-5"])
+def test_valores_invalidos_da_correcao(monkeypatch, caplog, raw):
+    monkeypatch.setenv("CORRECTION_MAX_ITERATIONS", raw)
+    monkeypatch.setenv("CORRECTION_TIMEOUT_MINUTES", raw)
+    with caplog.at_level(logging.WARNING):
+        assert config.get_correction_max_iterations() == 25
+        assert config.get_correction_timeout_seconds() == 10 * 60
+    assert "CORRECTION_MAX_ITERATIONS invalido" in caplog.text
+    assert "CORRECTION_TIMEOUT_MINUTES invalido" in caplog.text

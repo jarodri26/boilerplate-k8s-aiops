@@ -50,6 +50,14 @@ O agente de analise de causa raiz e configurado por:
 | `ANALYSIS_MAX_CONCURRENCY` | Maximo de analises simultaneas | `1` |
 | `ANALYSIS_STALE_TIMEOUT_MINUTES` | Relatorio EM_ANALISE sem atualizacao ha mais que isso e marcado INCOMPLETO | `30` |
 
+O agente de correcao automatica (PRD 004) e configurado por:
+
+| Variavel | Descricao | Padrao |
+|----------|-----------|--------|
+| `CORRECTION_MODEL_NAME` | Modelo Claude do agente de correcao | valor de `AGENT_MODEL_NAME` |
+| `CORRECTION_MAX_ITERATIONS` | Maximo de chamadas ao modelo por correcao | `25` |
+| `CORRECTION_TIMEOUT_MINUTES` | Prazo total de uma correcao; estouro marca FALHA_CORRECAO | `10` |
+
 Valores invalidos (nao numericos, zero ou negativos) usam o padrao, com warning no log.
 
 #### Permissoes do coletor no cluster (RBAC)
@@ -121,7 +129,7 @@ O agente LangChain conecta a esse servidor por HTTP em `http://localhost:3001/mc
 A aplicacao roda localmente via `uv`:
 
 ```bash
-uv run uvicorn meu_agente.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn my_agent.main:app --host 0.0.0.0 --port 8000
 ```
 
 ## Interface web
@@ -132,9 +140,13 @@ Com a aplicacao no ar, os relatorios de diagnostico ficam em `http://localhost:8
 |------|-----------|
 | `GET /reports` | Listagem de todos os relatorios (mais recentes primeiro) com status e severidade |
 | `GET /reports/{id}` | Detalhe com o Markdown do relatorio renderizado (HTML sanitizado com `nh3`) |
-| `POST /reports/{id}/fix` | Botao "Executar correcao" (COMPLETO ou FALHA_CORRECAO). Ate o PRD 004, apenas volta ao detalhe com "Correcao ainda nao disponivel" |
+| `POST /reports/{id}/fix` | Botao "Executar correcao" (COMPLETO ou FALHA_CORRECAO): passa o relatorio a CORRIGINDO e volta ao detalhe (303); a correcao roda em segundo plano. Outro status responde 409 ("Correcao ja em andamento" ou "Correcao nao permitida...") |
 
-**A v1 nao tem autenticacao.** Nao exponha a aplicacao publicamente: restrinja o acesso pela rede (VPN, ingress interno, port-forward).
+O detalhe mostra o status atual (atualize a pagina para acompanhar CORRIGINDO → CORRIGIDO/FALHA_CORRECAO) e, ao fim da correcao, a secao "Resultado da Correcao" com a resposta do agente. FALHA_CORRECAO pode ser re-acionado; uma correcao interrompida por restart vira FALHA_CORRECAO no startup.
+
+**A correcao escreve no cluster sem restricao (risco aceito na v1).** O agente de correcao recebe todas as tools do MCP Server, exceto `kubectl_context`, `port_forward`, `stop_port_forward` e `cleanup`: pode aplicar patches, escalar, reiniciar e deletar recursos, sem whitelist, dry-run ou aprovacao alem do clique. Revise o relatorio antes de acionar. O kubeconfig usado pelo MCP Server precisa de permissao de escrita nos recursos a corrigir.
+
+**A v1 nao tem autenticacao.** Como o botao dispara escrita no cluster, nao exponha a aplicacao publicamente: restrinja o acesso pela rede (VPN, ingress interno, port-forward).
 
 ## Testes
 

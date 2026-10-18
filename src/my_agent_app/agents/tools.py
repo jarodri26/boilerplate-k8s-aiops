@@ -9,8 +9,16 @@ logger = logging.getLogger(__name__)
 # Unicas tools do MCP Server Kubernetes expostas ao agente de analise (somente leitura)
 READ_ONLY_TOOLS = ("kubectl_get", "kubectl_describe", "kubectl_logs")
 
+# Tools que alteram o estado do proprio MCP Server (compartilhado com a analise): fora do
+# agente de correcao, que de resto tem acesso irrestrito ao cluster (PRD 004, D1)
+EXCLUDED_CORRECTION_TOOLS = ("kubectl_context", "port_forward", "stop_port_forward", "cleanup")
+
 
 class NoReadOnlyToolsError(RuntimeError):
+    pass
+
+
+class NoCorrectionToolsError(RuntimeError):
     pass
 
 
@@ -35,3 +43,22 @@ async def load_read_only_tools(
     """
     client = client_factory({"kubernetes": {"transport": "http", "url": url}})
     return filter_read_only_tools(await client.get_tools())
+
+
+def filter_correction_tools(tools: list[BaseTool]) -> list[BaseTool]:
+    selected = [tool for tool in tools if tool.name not in EXCLUDED_CORRECTION_TOOLS]
+    if not selected:
+        logger.warning("MCP Server nao expoe nenhuma tool utilizavel pela correcao")
+        raise NoCorrectionToolsError("MCP Server nao expoe nenhuma tool para a correcao")
+    return selected
+
+
+async def load_correction_tools(
+    url: str, client_factory: Callable[[dict], MultiServerMCPClient] = MultiServerMCPClient
+) -> list[BaseTool]:
+    """Conecta ao MCP Server via HTTP e devolve todas as tools menos as excluidas.
+
+    Falhas de conexao/sessao levantam excecao (tratadas pelo runner como FALHA_CORRECAO).
+    """
+    client = client_factory({"kubernetes": {"transport": "http", "url": url}})
+    return filter_correction_tools(await client.get_tools())

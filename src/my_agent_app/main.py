@@ -14,10 +14,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from my_agent_app.agents import config as agent_config
 from my_agent_app.agents.analyzer import RootCauseAnalyzer
+from my_agent_app.agents.corrector import CorrectionAgent
 from my_agent_app.api.router import router as api_router
 from my_agent_app.collector.config import get_collection_interval_seconds
 from my_agent_app.collector.handler import EventHandler
 from my_agent_app.collector.loop import EventCollector
+from my_agent_app.correction.runner import CorrectionRunner
 from my_agent_app.database import get_database_url
 from my_agent_app.models.repository import ReportRepository
 from my_agent_app.web.router import NOT_FOUND_MESSAGE, render_error
@@ -27,13 +29,19 @@ logger = logging.getLogger(__name__)
 
 
 async def recover_interrupted_analyses(repository: ReportRepository) -> None:
-    """Relatorios EM_ANALISE orfaos (crash/restart) viram INCOMPLETO antes da 1a coleta."""
+    """Orfaos de crash/restart antes da 1a coleta: EM_ANALISE -> INCOMPLETO e
+    CORRIGINDO -> FALHA_CORRECAO."""
     try:
         recovered = await repository.recover_on_startup()
     except Exception:
         logger.exception("Banco indisponivel na recuperacao de analises interrompidas")
         return
-    logger.info("Recuperacao no startup: %d analise(s) interrompida(s) marcada(s) INCOMPLETO", recovered)
+    logger.info(
+        "Recuperacao no startup: %d analise(s) interrompida(s) marcada(s) INCOMPLETO, "
+        "%d correcao(oes) interrompida(s) marcada(s) FALHA_CORRECAO",
+        recovered.analyses,
+        recovered.corrections,
+    )
 
 
 def build_event_handler(repository: ReportRepository) -> EventHandler:
@@ -52,6 +60,18 @@ def build_event_handler(repository: ReportRepository) -> EventHandler:
     )
 
 
+def build_correction_runner(repository: ReportRepository) -> CorrectionRunner:
+    # o MCP so e contatado quando uma correcao roda, nunca no startup
+    agent = CorrectionAgent(
+        model_name=agent_config.get_correction_model_name(),
+        max_iterations=agent_config.get_correction_max_iterations(),
+        mcp_server_url=agent_config.get_mcp_server_url(),
+    )
+    return CorrectionRunner(
+        repository, agent, timeout_seconds=agent_config.get_correction_timeout_seconds()
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     engine = create_async_engine(get_database_url())
@@ -61,6 +81,7 @@ async def lifespan(app: FastAPI):
 
     repository = ReportRepository(sessionmaker)
     await recover_interrupted_analyses(repository)
+    app.state.correction_runner = build_correction_runner(repository)
 
     collector = EventCollector(build_event_handler(repository), get_collection_interval_seconds())
     collector.start()

@@ -40,12 +40,13 @@ O codigo da aplicacao fica em `src/my_agent_app/` e e empacotado via hatchling (
 
 - **Database** (`database.py`) — `Base` declarativo e `DATABASE_URL`. O engine async (SQLAlchemy + asyncpg) e criado uma unica vez no `lifespan`. Schema versionado com Alembic (`alembic/`)
 - **API** (`api/router.py`) — Health check
-- **Interface Web** (`web/router.py`) — Pagina inicial e relatorios (PRD 003): `GET /reports` (listagem), `GET /reports/{id}` (detalhe com Markdown renderizado e sanitizado com `nh3` em `web/markdown_render.py`) e `POST /reports/{id}/fix` (stub ate o PRD 004: redireciona com `?fix=indisponivel`). Templates Jinja2 em `src/my_agent_app/templates/`. Sem autenticacao na v1: o acesso deve ser restrito pela rede
+- **Interface Web** (`web/router.py`) — Pagina inicial e relatorios (PRD 003): `GET /reports` (listagem), `GET /reports/{id}` (detalhe com Markdown renderizado e sanitizado com `nh3` em `web/markdown_render.py`) e `POST /reports/{id}/fix` (PRD 004: UPDATE condicional para CORRIGINDO no request, 303 para o detalhe e correcao em `BackgroundTasks`; outro status → 409 renderizando o detalhe com a mensagem). Templates Jinja2 em `src/my_agent_app/templates/`. Sem autenticacao na v1: o acesso deve ser restrito pela rede
 - **Collector** (`collector/`) — Loop periodico (iniciado no `lifespan`) que coleta eventos Warning do cluster via SDK `kubernetes` (`events.k8s.io/v1`, JSON cru) e despacha o batch fire-and-forget ao `EventHandler` (`collector/handler.py`), que e o pipeline de analise do PRD 002: descarta uid vazio, deduplica, grava EM_ANALISE, investiga (semaforo + prazo total) e substitui o relatorio do batch pelos relatorios por problema
-- **Agents** (`agents/`) — `RootCauseAnalyzer` (LangChain `create_agent` + Claude, `ModelCallLimitMiddleware`), conectado ao MCP Server Kubernetes por HTTP com apenas as tools `kubectl_get`/`kubectl_describe`/`kubectl_logs` (`tools.py`); prompt do PRD em `prompt.py`; parse da resposta Markdown em relatorios por problema em `report_parser.py` (funcao pura); config por env var em `config.py`
-- **Models** (`models/`) — Modelo `Report` (tabela `reports`, status com CHECK, `event_uids` `TEXT[]` com GIN) e `ReportRepository` (dedup, stale, recuperacao no startup, swap condicional via `DELETE ... RETURNING`)
+- **Agents** (`agents/`) — `RootCauseAnalyzer` (LangChain `create_agent` + Claude, `ModelCallLimitMiddleware`), conectado ao MCP Server Kubernetes por HTTP com apenas as tools `kubectl_get`/`kubectl_describe`/`kubectl_logs` (`tools.py`); prompt do PRD em `prompt.py`; parse da resposta Markdown em relatorios por problema em `report_parser.py` (funcao pura); config por env var em `config.py`. `CorrectionAgent` (`corrector.py`, PRD 004) e separado: todas as tools do MCP exceto `kubectl_context`/`port_forward`/`stop_port_forward`/`cleanup` (acesso de escrita irrestrito ao cluster, risco aceito), erros de execucao de tool (`McpError`/`ToolException`) voltam ao modelo via `ToolErrorMiddleware`, prompt em `correction_prompt.py` e veredito `CORRIGIDO:`/`FALHA:` em `verdict.py` (funcao pura; ausente ou ambiguo = falha)
+- **Correction** (`correction/runner.py`) — `CorrectionRunner`, criado no `lifespan` (`app.state.correction_runner`): le o relatorio CORRIGINDO, roda o agente com prazo total, classifica o veredito e grava status final + `correction_result` so se ainda CORRIGINDO. Nunca levanta
+- **Models** (`models/`) — Modelo `Report` (tabela `reports`, status com CHECK, `event_uids` `TEXT[]` com GIN) e `ReportRepository` (dedup, stale, recuperacao no startup, swap condicional via `DELETE ... RETURNING`, transicoes de correcao condicionais `start_correction`/`finish_correction`)
 
-No startup, o `lifespan` marca como INCOMPLETO os relatorios EM_ANALISE orfaos antes de iniciar o coletor.
+No startup, o `lifespan` marca como INCOMPLETO os relatorios EM_ANALISE orfaos e como FALHA_CORRECAO os CORRIGINDO orfaos antes de iniciar o coletor.
 
 ## Variaveis de ambiente
 
@@ -60,6 +61,9 @@ No startup, o `lifespan` marca como INCOMPLETO os relatorios EM_ANALISE orfaos a
 | `AGENT_TIMEOUT_MINUTES` | Prazo total de uma analise, em minutos (deve ser menor que `ANALYSIS_STALE_TIMEOUT_MINUTES`; senao usa stale - 1) | `20` |
 | `ANALYSIS_MAX_CONCURRENCY` | Maximo de analises simultaneas | `1` |
 | `ANALYSIS_STALE_TIMEOUT_MINUTES` | Relatorio EM_ANALISE sem atualizacao ha mais que isso e marcado INCOMPLETO | `30` |
+| `CORRECTION_MODEL_NAME` | Modelo Claude do agente de correcao | valor de `AGENT_MODEL_NAME` |
+| `CORRECTION_MAX_ITERATIONS` | Maximo de chamadas ao modelo por correcao | `25` |
+| `CORRECTION_TIMEOUT_MINUTES` | Prazo total de uma correcao, em minutos (estouro → FALHA_CORRECAO) | `10` |
 | `TEST_DATABASE_URL` | Banco dos testes de integracao (schema temporario por teste) | valor padrao de `DATABASE_URL` |
 
 ## Infraestrutura (docker-compose)

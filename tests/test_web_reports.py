@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
 from my_agent_app import main
-from my_agent_app.web.router import get_report_repository
+from my_agent_app.models.report import ReportStatus
+from my_agent_app.web.router import get_correction_runner, get_report_repository
 
 NOW = datetime(2026, 10, 18, 20, 30, tzinfo=timezone.utc)
 
@@ -38,6 +39,7 @@ class FakeReport:
     severity: str | None = "ALTO"
     markdown: str = MARKDOWN
     created_at: datetime = NOW
+    correction_result: str | None = None
     id: uuid.UUID = field(default_factory=uuid.uuid4)
 
 
@@ -59,11 +61,38 @@ class FakeReportRepository:
             raise self.error
         return next((r for r in self.reports if r.id == report_id), None)
 
+    async def start_correction(self, report_id):
+        self.calls.append("start_correction")
+        if self.error:
+            raise self.error
+        report = next((r for r in self.reports if r.id == report_id), None)
+        if report is None or report.status not in (
+            ReportStatus.COMPLETO,
+            ReportStatus.FALHA_CORRECAO,
+        ):
+            return False
+        report.status = ReportStatus.CORRIGINDO
+        return True
+
+
+class FakeRunner:
+    def __init__(self):
+        self.runs = []
+
+    async def run(self, report_id):
+        self.runs.append(report_id)
+
 
 @pytest.fixture
-def client_with():
+def runner():
+    return FakeRunner()
+
+
+@pytest.fixture
+def client_with(runner):
     def _make(repo):
         main.app.dependency_overrides[get_report_repository] = lambda: repo
+        main.app.dependency_overrides[get_correction_runner] = lambda: runner
         # sem "with": o lifespan (engine, coletor) nao roda
         return TestClient(main.app)
 
@@ -222,51 +251,106 @@ def test_botao_de_correcao_conforme_status(client_with, status, visible):
     assert (f'action="/reports/{report.id}/fix"' in html) is visible
 
 
-@pytest.mark.parametrize(
-    ("key", "message"),
-    [("indisponivel", "Correção ainda não disponível"), ("em_andamento", "Correção já em andamento")],
-)
-def test_mensagens_do_fluxo_de_correcao(client_with, key, message):
-    report = FakeReport("COMPLETO")
-
-    html = client_with(FakeReportRepository([report])).get(f"/reports/{report.id}?fix={key}").text
-
-    assert message in html
+# --- PRD 004: POST /fix -------------------------------------------------------------
 
 
-def test_chave_desconhecida_nao_exibe_nem_ecoa_o_valor(client_with):
-    report = FakeReport("COMPLETO")
-
-    html = client_with(FakeReportRepository([report])).get(
-        f"/reports/{report.id}?fix=%3Cb%3Einjetado%3C%2Fb%3E"
-    ).text
-
-    assert 'class="flash"' not in html
-    assert "injetado" not in html
-
-
-# --- 5.3 stub do POST /fix ----------------------------------------------------------------
-
-
-def test_stub_redireciona_para_o_detalhe_com_aviso(client_with):
-    report = FakeReport("COMPLETO")
+@pytest.mark.parametrize("status", ["COMPLETO", "FALHA_CORRECAO"])
+def test_fix_aciona_a_correcao_e_redireciona(client_with, runner, status):
+    report = FakeReport(status)
     repo = FakeReportRepository([report])
     client = client_with(repo)
 
     resp = client.post(f"/reports/{report.id}/fix", follow_redirects=False)
 
     assert resp.status_code == 303
-    assert resp.headers["location"] == f"/reports/{report.id}?fix=indisponivel"
-    assert repo.calls == ["get_report"]  # nenhuma escrita
-    assert report.status == "COMPLETO"
+    assert resp.headers["location"] == f"/reports/{report.id}"
+    assert repo.calls == ["start_correction"]
+    assert runner.runs == [report.id]  # TestClient executa a background task antes de responder
+    assert report.status == "CORRIGINDO"
 
-    followed = client.post(f"/reports/{report.id}/fix")
-    assert "Correção ainda não disponível" in followed.text
+    detalhe = client.get(resp.headers["location"]).text
+    assert '<span class="badge badge-executing">CORRIGINDO</span>' in detalhe
+    assert "Executar correção" not in detalhe
 
 
-def test_stub_para_relatorio_inexistente_responde_404(client_with):
+def test_fix_em_corrigindo_responde_409_em_andamento(client_with, runner):
+    report = FakeReport("CORRIGINDO")
+
+    resp = client_with(FakeReportRepository([report])).post(
+        f"/reports/{report.id}/fix", follow_redirects=False
+    )
+
+    assert resp.status_code == 409
+    assert resp.headers["content-type"].startswith("text/html")
+    assert "Correção já em andamento" in resp.text
+    assert str(report.id) in resp.text  # e a pagina de detalhe
+    assert runner.runs == []
+
+
+@pytest.mark.parametrize("status", ["EM_ANALISE", "INCOMPLETO", "CORRIGIDO"])
+def test_fix_em_status_nao_elegivel_responde_409(client_with, runner, status):
+    report = FakeReport(status)
+
+    resp = client_with(FakeReportRepository([report])).post(f"/reports/{report.id}/fix")
+
+    assert resp.status_code == 409
+    assert f"Correção não permitida para relatórios com status {status}" in resp.text
+    assert runner.runs == []
+
+
+def test_fix_para_relatorio_inexistente_responde_404(client_with, runner):
     resp = client_with(FakeReportRepository()).post(
         f"/reports/{uuid.uuid4()}/fix", follow_redirects=False
     )
 
     assert resp.status_code == 404
+    assert "Relatório não encontrado" in resp.text
+    assert runner.runs == []
+
+
+@pytest.mark.parametrize("error", [_db_down(), ConnectionRefusedError("recusado")])
+def test_fix_com_banco_indisponivel_responde_503(client_with, runner, error):
+    resp = client_with(FakeReportRepository(error=error)).post(f"/reports/{uuid.uuid4()}/fix")
+
+    assert resp.status_code == 503
+    assert "Banco de dados indisponível, tente novamente em instantes" in resp.text
+    assert runner.runs == []
+
+
+def test_parametro_fix_antigo_e_ignorado(client_with):
+    report = FakeReport("COMPLETO")
+
+    html = client_with(FakeReportRepository([report])).get(
+        f"/reports/{report.id}?fix=indisponivel"
+    ).text
+
+    assert 'class="flash"' not in html
+    assert "Correção ainda não disponível" not in html
+
+
+# --- PRD 004: resultado da correcao no detalhe ---------------------------------------
+
+
+def test_detalhe_exibe_resultado_da_correcao(client_with):
+    report = FakeReport(
+        "CORRIGIDO",
+        correction_result=(
+            "CORRIGIDO: imagem trocada\n\n## Acoes Executadas\n\n### Problema 1: Imagem\n"
+            "- **Status:** Corrigido\n\n<script>alert('r')</script>"
+        ),
+    )
+
+    html = client_with(FakeReportRepository([report])).get(f"/reports/{report.id}").text
+
+    assert "Resultado da Correção" in html
+    assert "<h2>Acoes Executadas</h2>" in html
+    assert "<strong>Status:</strong> Corrigido" in html
+    assert "alert('r')" not in html and "<script>alert" not in html
+
+
+def test_detalhe_sem_correcao_nao_exibe_a_secao(client_with):
+    report = FakeReport("COMPLETO")
+
+    html = client_with(FakeReportRepository([report])).get(f"/reports/{report.id}").text
+
+    assert "Resultado da Correção" not in html

@@ -10,6 +10,8 @@ DEFAULT_AGENT_MAX_ITERATIONS = 25
 DEFAULT_AGENT_TIMEOUT_MINUTES = 20
 DEFAULT_ANALYSIS_MAX_CONCURRENCY = 1
 DEFAULT_ANALYSIS_STALE_TIMEOUT_MINUTES = 30
+DEFAULT_CORRECTION_MAX_ITERATIONS = 25
+DEFAULT_CORRECTION_TIMEOUT_MINUTES = 10
 
 
 def _positive_number(env: str, default: float, integer: bool = False) -> float:
@@ -68,3 +70,21 @@ def get_agent_timeout_seconds(stale_seconds: float) -> float:
         )
         return capped
     return timeout
+
+
+def get_correction_model_name() -> str:
+    """Modelo do agente de correcao (PRD 004, D7); sem override, o mesmo da analise."""
+    return os.environ.get("CORRECTION_MODEL_NAME") or get_agent_model_name()
+
+
+def get_correction_max_iterations() -> int:
+    return int(
+        _positive_number(
+            "CORRECTION_MAX_ITERATIONS", DEFAULT_CORRECTION_MAX_ITERATIONS, integer=True
+        )
+    )
+
+
+def get_correction_timeout_seconds() -> float:
+    """Prazo total de uma correcao (PRD 004, D3)."""
+    return _positive_number("CORRECTION_TIMEOUT_MINUTES", DEFAULT_CORRECTION_TIMEOUT_MINUTES) * 60

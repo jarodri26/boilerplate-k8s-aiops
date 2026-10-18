@@ -1,5 +1,6 @@
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Protocol
 
@@ -7,6 +8,13 @@ from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from my_agent_app.models.report import ACTIVE_STATUSES, Report, ReportStatus
+
+# Relatorios a partir dos quais a correcao (PRD 004) pode ser acionada
+CORRECTION_ELIGIBLE = (ReportStatus.COMPLETO, ReportStatus.FALHA_CORRECAO)
+
+CORRECTION_INTERRUPTED_MESSAGE = (
+    "Correção interrompida pelo reinício da aplicação; o resultado não foi registrado."
+)
 
 
 class ReportDraft(Protocol):
@@ -16,6 +24,12 @@ class ReportDraft(Protocol):
     event_uids: list[str]
     severity: str | None
     status: str
+
+
+@dataclass(frozen=True)
+class StartupRecovery:
+    analyses: int
+    corrections: int
 
 
 class ReportRepository:
@@ -33,15 +47,25 @@ class ReportRepository:
         async with self._sessionmaker() as session:
             return await session.get(Report, report_id)
 
-    async def recover_on_startup(self) -> int:
-        """Analises interrompidas por crash/restart: EM_ANALISE -> INCOMPLETO."""
+    async def recover_on_startup(self) -> StartupRecovery:
+        """Trabalho interrompido por crash/restart: EM_ANALISE -> INCOMPLETO e
+        CORRIGINDO -> FALHA_CORRECAO (re-acionavel), na mesma transacao."""
         async with self._sessionmaker.begin() as session:
-            result = await session.execute(
+            analyses = await session.execute(
                 update(Report)
                 .where(Report.status == ReportStatus.EM_ANALISE)
                 .values(status=ReportStatus.INCOMPLETO, updated_at=func.now())
             )
-            return result.rowcount
+            corrections = await session.execute(
+                update(Report)
+                .where(Report.status == ReportStatus.CORRIGINDO)
+                .values(
+                    status=ReportStatus.FALHA_CORRECAO,
+                    correction_result=CORRECTION_INTERRUPTED_MESSAGE,
+                    updated_at=func.now(),
+                )
+            )
+            return StartupRecovery(analyses.rowcount, corrections.rowcount)
 
     async def register_batch(
         self, uids: Sequence[str], stale_seconds: float
@@ -135,3 +159,33 @@ class ReportRepository:
                     ],
                 )
             return True
+
+    async def start_correction(self, report_id: uuid.UUID) -> bool:
+        """COMPLETO/FALHA_CORRECAO -> CORRIGINDO em um unico UPDATE condicional (evita TOCTOU).
+
+        Zera o resultado da correcao anterior. False se o relatorio nao existe ou nao e elegivel.
+        """
+        async with self._sessionmaker.begin() as session:
+            updated = (
+                await session.execute(
+                    update(Report)
+                    .where(Report.id == report_id, Report.status.in_(CORRECTION_ELIGIBLE))
+                    .values(
+                        status=ReportStatus.CORRIGINDO,
+                        correction_result=None,
+                        updated_at=func.now(),
+                    )
+                    .returning(Report.id)
+                )
+            ).first()
+            return updated is not None
+
+    async def finish_correction(self, report_id: uuid.UUID, status: str, result: str) -> bool:
+        """Grava o final da correcao so se o relatorio ainda estiver CORRIGINDO (D5)."""
+        async with self._sessionmaker.begin() as session:
+            updated = await session.execute(
+                update(Report)
+                .where(Report.id == report_id, Report.status == ReportStatus.CORRIGINDO)
+                .values(status=status, correction_result=result, updated_at=func.now())
+            )
+            return updated.rowcount == 1
